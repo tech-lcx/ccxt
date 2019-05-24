@@ -255,7 +255,7 @@ module.exports = class bitfinex2 extends bitfinex {
                 });
             }
             // Storing markets in Redis
-            await redisWrite(this.id + '|markets', result, false, 60);
+            await redisWrite(this.id + '|markets', result, false, 60 * 10);
             return result;
         }
     }
