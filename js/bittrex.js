@@ -5,6 +5,7 @@
 const Exchange = require ('./base/Exchange');
 const { ExchangeError, ExchangeNotAvailable, AuthenticationError, InvalidOrder, InsufficientFunds, OrderNotFound, DDoSProtection, PermissionDenied, AddressPending } = require ('./base/errors');
 const { TRUNCATE, DECIMAL_PLACES } = require ('./base/functions/number');
+const { redisRead, redisWrite } = require('../../../lib/utils');
 
 //  ---------------------------------------------------------------------------
 
@@ -216,52 +217,58 @@ module.exports = class bittrex extends Exchange {
     async fetchMarkets (params = {}) {
         // https://github.com/ccxt/ccxt/commit/866370ba6c9cabaf5995d992c15a82e38b8ca291
         // https://github.com/ccxt/ccxt/pull/4304
-        const response = await this.publicGetMarkets ();
-        const result = [];
-        const markets = this.safeValue (response, 'result');
-        for (let i = 0; i < markets.length; i++) {
-            const market = markets[i];
-            let id = market['MarketName'];
-            let baseId = market['MarketCurrency'];
-            let quoteId = market['BaseCurrency'];
-            let base = this.commonCurrencyCode (baseId);
-            let quote = this.commonCurrencyCode (quoteId);
-            let symbol = base + '/' + quote;
-            let pricePrecision = 8;
-            if (quote in this.options['pricePrecisionByCode'])
-                pricePrecision = this.options['pricePrecisionByCode'][quote];
-            let precision = {
-                'amount': 8,
-                'price': pricePrecision,
-            };
-            // bittrex uses boolean values, bleutrade uses strings
-            let active = this.safeValue (market, 'IsActive', false);
-            if ((active !== 'false') || active) {
-                active = true;
+        let cacheData = await redisRead(this.id + '|markets');
+        if (cacheData) return cacheData;
+        else {
+            const response = await this.publicGetMarkets ();
+            const result = [];
+            const markets = this.safeValue (response, 'result');
+            for (let i = 0; i < markets.length; i++) {
+                const market = markets[i];
+                let id = market['MarketName'];
+                let baseId = market['MarketCurrency'];
+                let quoteId = market['BaseCurrency'];
+                let base = this.commonCurrencyCode (baseId);
+                let quote = this.commonCurrencyCode (quoteId);
+                let symbol = base + '/' + quote;
+                let pricePrecision = 8;
+                if (quote in this.options['pricePrecisionByCode'])
+                    pricePrecision = this.options['pricePrecisionByCode'][quote];
+                let precision = {
+                    'amount': 8,
+                    'price': pricePrecision,
+                };
+                // bittrex uses boolean values, bleutrade uses strings
+                let active = this.safeValue (market, 'IsActive', false);
+                if ((active !== 'false') || active) {
+                    active = true;
+                }
+                result.push ({
+                    'id': id,
+                    'symbol': symbol,
+                    'base': base,
+                    'quote': quote,
+                    'baseId': baseId,
+                    'quoteId': quoteId,
+                    'active': active,
+                    'info': market,
+                    'precision': precision,
+                    'limits': {
+                        'amount': {
+                            'min': market['MinTradeSize'],
+                            'max': undefined,
+                        },
+                        'price': {
+                            'min': Math.pow (10, -precision['price']),
+                            'max': undefined,
+                        },
+                    },
+                });
             }
-            result.push ({
-                'id': id,
-                'symbol': symbol,
-                'base': base,
-                'quote': quote,
-                'baseId': baseId,
-                'quoteId': quoteId,
-                'active': active,
-                'info': market,
-                'precision': precision,
-                'limits': {
-                    'amount': {
-                        'min': market['MinTradeSize'],
-                        'max': undefined,
-                    },
-                    'price': {
-                        'min': Math.pow (10, -precision['price']),
-                        'max': undefined,
-                    },
-                },
-            });
+            // Storing markets in Redis
+            await redisWrite(this.id + '|markets', result, false, 60);
+            return result;
         }
-        return result;
     }
 
     async fetchBalance (params = {}) {

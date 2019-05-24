@@ -5,7 +5,7 @@
 const Exchange = require ('./base/Exchange');
 const { NotSupported, DDoSProtection, AuthenticationError, PermissionDenied, ArgumentsRequired, ExchangeError, ExchangeNotAvailable, InsufficientFunds, InvalidOrder, OrderNotFound, InvalidNonce } = require ('./base/errors');
 const { SIGNIFICANT_DIGITS } = require ('./base/functions/number');
-
+const { redisRead, redisWrite } = require('../../../lib/utils');
 //  ---------------------------------------------------------------------------
 
 module.exports = class bitfinex extends Exchange {
@@ -461,53 +461,59 @@ module.exports = class bitfinex extends Exchange {
     }
 
     async fetchMarkets (params = {}) {
-        const ids = await this.publicGetSymbols ();
-        const details = await this.publicGetSymbolsDetails ();
-        const result = [];
-        for (let i = 0; i < details.length; i++) {
-            const market = details[i];
-            let id = this.safeString (market, 'pair');
-            if (!this.inArray (id, ids)) {
-                continue;
+        let cacheData = await redisRead(this.id + '|markets');
+        if (cacheData) return cacheData;
+        else {
+            const ids = await this.publicGetSymbols ();
+            const details = await this.publicGetSymbolsDetails ();
+            const result = [];
+            for (let i = 0; i < details.length; i++) {
+                const market = details[i];
+                let id = this.safeString (market, 'pair');
+                if (!this.inArray (id, ids)) {
+                    continue;
+                }
+                id = id.toUpperCase ();
+                const baseId = id.slice (0, 3);
+                const quoteId = id.slice (3, 6);
+                const base = this.commonCurrencyCode (baseId);
+                const quote = this.commonCurrencyCode (quoteId);
+                const symbol = base + '/' + quote;
+                const precision = {
+                    'price': market['price_precision'],
+                    'amount': undefined,
+                };
+                const limits = {
+                    'amount': {
+                        'min': this.safeFloat (market, 'minimum_order_size'),
+                        'max': this.safeFloat (market, 'maximum_order_size'),
+                    },
+                    'price': {
+                        'min': Math.pow (10, -precision['price']),
+                        'max': Math.pow (10, precision['price']),
+                    },
+                };
+                limits['cost'] = {
+                    'min': limits['amount']['min'] * limits['price']['min'],
+                    'max': undefined,
+                };
+                result.push ({
+                    'id': id,
+                    'symbol': symbol,
+                    'base': base,
+                    'quote': quote,
+                    'baseId': baseId,
+                    'quoteId': quoteId,
+                    'active': true,
+                    'precision': precision,
+                    'limits': limits,
+                    'info': market,
+                });
             }
-            id = id.toUpperCase ();
-            const baseId = id.slice (0, 3);
-            const quoteId = id.slice (3, 6);
-            const base = this.commonCurrencyCode (baseId);
-            const quote = this.commonCurrencyCode (quoteId);
-            const symbol = base + '/' + quote;
-            const precision = {
-                'price': market['price_precision'],
-                'amount': undefined,
-            };
-            const limits = {
-                'amount': {
-                    'min': this.safeFloat (market, 'minimum_order_size'),
-                    'max': this.safeFloat (market, 'maximum_order_size'),
-                },
-                'price': {
-                    'min': Math.pow (10, -precision['price']),
-                    'max': Math.pow (10, precision['price']),
-                },
-            };
-            limits['cost'] = {
-                'min': limits['amount']['min'] * limits['price']['min'],
-                'max': undefined,
-            };
-            result.push ({
-                'id': id,
-                'symbol': symbol,
-                'base': base,
-                'quote': quote,
-                'baseId': baseId,
-                'quoteId': quoteId,
-                'active': true,
-                'precision': precision,
-                'limits': limits,
-                'info': market,
-            });
-        }
-        return result;
+            // Storing markets in Redis
+            await redisWrite(this.id + '|markets', result, false, 60);
+            return result;
+        } 
     }
 
     calculateFee (symbol, type, side, amount, price, takerOrMaker = 'taker', params = {}) {

@@ -5,7 +5,7 @@
 const Exchange = require ('./base/Exchange');
 const { ExchangeNotAvailable, ArgumentsRequired, PermissionDenied, AuthenticationError, ExchangeError, OrderNotFound, DDoSProtection, InvalidNonce, InsufficientFunds, CancelPending, InvalidOrder, InvalidAddress } = require ('./base/errors');
 const { TRUNCATE, DECIMAL_PLACES } = require ('./base/functions/number');
-
+const { redisRead, redisWrite } = require('../../../lib/utils');
 //  ---------------------------------------------------------------------------
 
 module.exports = class kraken extends Exchange {
@@ -260,75 +260,81 @@ module.exports = class kraken extends Exchange {
     }
 
     async fetchMarkets (params = {}) {
-        let markets = await this.publicGetAssetPairs ();
-        let limits = await this.fetchMinOrderAmounts ();
-        let keys = Object.keys (markets['result']);
-        let result = [];
-        for (let i = 0; i < keys.length; i++) {
-            let id = keys[i];
-            let market = markets['result'][id];
-            let baseId = market['base'];
-            let quoteId = market['quote'];
-            let base = baseId;
-            let quote = quoteId;
-            if (base.length > 3) {
-                if ((base[0] === 'X') || (base[0] === 'Z')) {
-                    base = base.slice (1);
+        let cacheData = await redisRead(this.id + '|markets');
+        if (cacheData) return cacheData;
+        else {
+            let markets = await this.publicGetAssetPairs ();
+            let limits = await this.fetchMinOrderAmounts ();
+            let keys = Object.keys (markets['result']);
+            let result = [];
+            for (let i = 0; i < keys.length; i++) {
+                let id = keys[i];
+                let market = markets['result'][id];
+                let baseId = market['base'];
+                let quoteId = market['quote'];
+                let base = baseId;
+                let quote = quoteId;
+                if (base.length > 3) {
+                    if ((base[0] === 'X') || (base[0] === 'Z')) {
+                        base = base.slice (1);
+                    }
                 }
-            }
-            if (quote.length > 3) {
-                if ((quote[0] === 'X') || (quote[0] === 'Z')) {
-                    quote = quote.slice (1);
+                if (quote.length > 3) {
+                    if ((quote[0] === 'X') || (quote[0] === 'Z')) {
+                        quote = quote.slice (1);
+                    }
                 }
+                base = this.commonCurrencyCode (base);
+                quote = this.commonCurrencyCode (quote);
+                let darkpool = id.indexOf ('.d') >= 0;
+                let symbol = darkpool ? market['altname'] : (base + '/' + quote);
+                let maker = undefined;
+                if ('fees_maker' in market) {
+                    maker = parseFloat (market['fees_maker'][0][1]) / 100;
+                }
+                let precision = {
+                    'amount': market['lot_decimals'],
+                    'price': market['pair_decimals'],
+                };
+                let minAmount = Math.pow (10, -precision['amount']);
+                if (base in limits)
+                    minAmount = limits[base];
+                result.push ({
+                    'id': id,
+                    'symbol': symbol,
+                    'base': base,
+                    'quote': quote,
+                    'baseId': baseId,
+                    'quoteId': quoteId,
+                    'darkpool': darkpool,
+                    'info': market,
+                    'altname': market['altname'],
+                    'maker': maker,
+                    'taker': parseFloat (market['fees'][0][1]) / 100,
+                    'active': true,
+                    'precision': precision,
+                    'limits': {
+                        'amount': {
+                            'min': minAmount,
+                            'max': Math.pow (10, precision['amount']),
+                        },
+                        'price': {
+                            'min': Math.pow (10, -precision['price']),
+                            'max': undefined,
+                        },
+                        'cost': {
+                            'min': 0,
+                            'max': undefined,
+                        },
+                    },
+                });
             }
-            base = this.commonCurrencyCode (base);
-            quote = this.commonCurrencyCode (quote);
-            let darkpool = id.indexOf ('.d') >= 0;
-            let symbol = darkpool ? market['altname'] : (base + '/' + quote);
-            let maker = undefined;
-            if ('fees_maker' in market) {
-                maker = parseFloat (market['fees_maker'][0][1]) / 100;
-            }
-            let precision = {
-                'amount': market['lot_decimals'],
-                'price': market['pair_decimals'],
-            };
-            let minAmount = Math.pow (10, -precision['amount']);
-            if (base in limits)
-                minAmount = limits[base];
-            result.push ({
-                'id': id,
-                'symbol': symbol,
-                'base': base,
-                'quote': quote,
-                'baseId': baseId,
-                'quoteId': quoteId,
-                'darkpool': darkpool,
-                'info': market,
-                'altname': market['altname'],
-                'maker': maker,
-                'taker': parseFloat (market['fees'][0][1]) / 100,
-                'active': true,
-                'precision': precision,
-                'limits': {
-                    'amount': {
-                        'min': minAmount,
-                        'max': Math.pow (10, precision['amount']),
-                    },
-                    'price': {
-                        'min': Math.pow (10, -precision['price']),
-                        'max': undefined,
-                    },
-                    'cost': {
-                        'min': 0,
-                        'max': undefined,
-                    },
-                },
-            });
+            result = this.appendInactiveMarkets (result);
+            this.marketsByAltname = this.indexBy (result, 'altname');
+            // Storing markets in Redis
+            await redisWrite(this.id + '|markets', result, false, 60);
+            return result;
         }
-        result = this.appendInactiveMarkets (result);
-        this.marketsByAltname = this.indexBy (result, 'altname');
-        return result;
     }
 
     appendInactiveMarkets (result) {

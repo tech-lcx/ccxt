@@ -4,7 +4,7 @@
 
 const bitfinex = require ('./bitfinex.js');
 const { ExchangeError, NotSupported, InsufficientFunds } = require ('./base/errors');
-
+const { redisRead, redisWrite } = require('../../../lib/utils');
 // ---------------------------------------------------------------------------
 
 module.exports = class bitfinex2 extends bitfinex {
@@ -207,51 +207,57 @@ module.exports = class bitfinex2 extends bitfinex {
     }
 
     async fetchMarkets (params = {}) {
-        let markets = await this.v1GetSymbolsDetails ();
-        let result = [];
-        for (let p = 0; p < markets.length; p++) {
-            let market = markets[p];
-            let id = market['pair'].toUpperCase ();
-            let baseId = id.slice (0, 3);
-            let quoteId = id.slice (3, 6);
-            let base = this.commonCurrencyCode (baseId);
-            let quote = this.commonCurrencyCode (quoteId);
-            let symbol = base + '/' + quote;
-            id = 't' + id;
-            baseId = this.getCurrencyId (baseId);
-            quoteId = this.getCurrencyId (quoteId);
-            let precision = {
-                'price': market['price_precision'],
-                'amount': market['price_precision'],
-            };
-            let limits = {
-                'amount': {
-                    'min': this.safeFloat (market, 'minimum_order_size'),
-                    'max': this.safeFloat (market, 'maximum_order_size'),
-                },
-                'price': {
-                    'min': Math.pow (10, -precision['price']),
-                    'max': Math.pow (10, precision['price']),
-                },
-            };
-            limits['cost'] = {
-                'min': limits['amount']['min'] * limits['price']['min'],
-                'max': undefined,
-            };
-            result.push ({
-                'id': id,
-                'symbol': symbol,
-                'base': base,
-                'quote': quote,
-                'baseId': baseId,
-                'quoteId': quoteId,
-                'active': true,
-                'precision': precision,
-                'limits': limits,
-                'info': market,
-            });
+        let cacheData = await redisRead(this.id + '|markets');
+        if (cacheData) return cacheData;
+        else {
+            let markets = await this.v1GetSymbolsDetails ();
+            let result = [];
+            for (let p = 0; p < markets.length; p++) {
+                let market = markets[p];
+                let id = market['pair'].toUpperCase ();
+                let baseId = id.slice (0, 3);
+                let quoteId = id.slice (3, 6);
+                let base = this.commonCurrencyCode (baseId);
+                let quote = this.commonCurrencyCode (quoteId);
+                let symbol = base + '/' + quote;
+                id = 't' + id;
+                baseId = this.getCurrencyId (baseId);
+                quoteId = this.getCurrencyId (quoteId);
+                let precision = {
+                    'price': market['price_precision'],
+                    'amount': market['price_precision'],
+                };
+                let limits = {
+                    'amount': {
+                        'min': this.safeFloat (market, 'minimum_order_size'),
+                        'max': this.safeFloat (market, 'maximum_order_size'),
+                    },
+                    'price': {
+                        'min': Math.pow (10, -precision['price']),
+                        'max': Math.pow (10, precision['price']),
+                    },
+                };
+                limits['cost'] = {
+                    'min': limits['amount']['min'] * limits['price']['min'],
+                    'max': undefined,
+                };
+                result.push ({
+                    'id': id,
+                    'symbol': symbol,
+                    'base': base,
+                    'quote': quote,
+                    'baseId': baseId,
+                    'quoteId': quoteId,
+                    'active': true,
+                    'precision': precision,
+                    'limits': limits,
+                    'info': market,
+                });
+            }
+            // Storing markets in Redis
+            await redisWrite(this.id + '|markets', result, false, 60);
+            return result;
         }
-        return result;
     }
 
     async fetchBalance (params = {}) {
