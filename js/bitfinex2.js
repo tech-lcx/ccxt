@@ -31,6 +31,8 @@ module.exports = class bitfinex2 extends bitfinex {
                 'fetchOpenOrders': false,
                 'fetchOrder': true,
                 'fetchTickers': true,
+                'fetchDeposits': true,
+                'fetchWithdrawals': true,
                 'fetchTradingFee': false,
                 'fetchTradingFees': false,
                 'withdraw': true,
@@ -603,8 +605,36 @@ module.exports = class bitfinex2 extends bitfinex {
         return this.parseTrades (response, market, since, limit);
     }
 
+    async fetchDeposits(symbol = undefined, since = undefined, limit = 25, params = {}) {
+
+      let response = await this.privatePostAuthRMovementsHist(this.extend(params));
+      let result = [];
+      response.map((k) => {
+        if (k[9] == 'COMPLETED' && k[12] > 0) {
+          let obj = { currency: k[1], timestamp: k[6], amount: k[12], status: k[9], txid: k[20], address: k[16], fee:{cost: k[13], currency: k[1] } };
+          result.push(obj);
+        }
+      });
+      // return this.parseTrades (response, market, since, limit); // not implemented yet for bitfinex v2
+      return result
+    }
+
+    async fetchWithdrawals(symbol = undefined, since = undefined, limit = 25, params = {}) {
+
+      let response = await this.privatePostAuthRMovementsHist(this.extend(params));
+      let result = [];
+      response.map((k) => {
+        if (k[9] == 'COMPLETED' && k[12] < 0) {
+          let obj = { currency: k[1], timestamp: k[6], amount: -k[12], status: k[9], txid: k[20], address: k[16], fee:{cost: -k[13], currency: k[1] } };
+          result.push(obj);
+        }
+      });
+      // return this.parseTrades (response, market, since, limit); // not implemented yet for bitfinex v2
+      return result
+    }
+
     nonce () {
-        return this.milliseconds ();
+        return this.microseconds () * 100000;
     }
 
     sign (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {

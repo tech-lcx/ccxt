@@ -1035,7 +1035,7 @@ module.exports = class bitfinex extends Exchange {
     }
 
     nonce () {
-        return this.milliseconds ();
+        return this.microseconds () * 100000;
     }
 
     sign (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
