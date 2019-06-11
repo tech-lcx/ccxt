@@ -4,6 +4,7 @@
 
 const Exchange = require ('./base/Exchange');
 const { AuthenticationError, BadRequest, DDoSProtection, ExchangeError, ExchangeNotAvailable, InsufficientFunds, InvalidOrder, OrderNotFound, PermissionDenied } = require ('./base/errors');
+const { redisRead, redisWrite } = require('../../../lib/utils');
 
 //  ---------------------------------------------------------------------------
 
@@ -155,88 +156,94 @@ module.exports = class bitmex extends Exchange {
     }
 
     async fetchMarkets (params = {}) {
-        const response = await this.publicGetInstrumentActiveAndIndices (params);
-        const result = [];
-        for (let i = 0; i < response.length; i++) {
-            const market = response[i];
-            const active = (market['state'] !== 'Unlisted');
-            const id = market['symbol'];
-            const baseId = market['underlying'];
-            const quoteId = market['quoteCurrency'];
-            const basequote = baseId + quoteId;
-            const base = this.commonCurrencyCode (baseId);
-            const quote = this.commonCurrencyCode (quoteId);
-            const swap = (id === basequote);
-            // 'positionCurrency' may be empty ("", as Bitmex currently returns for ETHUSD)
-            // so let's take the quote currency first and then adjust if needed
-            const positionId = this.safeString2 (market, 'positionCurrency', 'quoteCurrency');
-            let type = undefined;
-            let future = false;
-            let prediction = false;
-            let position = this.commonCurrencyCode (positionId);
-            let symbol = id;
-            if (swap) {
-                type = 'swap';
-                symbol = base + '/' + quote;
-            } else if (id.indexOf ('B_') >= 0) {
-                prediction = true;
-                type = 'prediction';
-            } else {
-                future = true;
-                type = 'future';
+        let cacheData = await redisRead(this.id + '|markets');
+        if (cacheData) return cacheData;
+        else {
+            const response = await this.publicGetInstrumentActiveAndIndices (params);
+            const result = [];
+            for (let i = 0; i < response.length; i++) {
+                const market = response[i];
+                const active = (market['state'] !== 'Unlisted');
+                const id = market['symbol'];
+                const baseId = market['underlying'];
+                const quoteId = market['quoteCurrency'];
+                const basequote = baseId + quoteId;
+                const base = this.commonCurrencyCode (baseId);
+                const quote = this.commonCurrencyCode (quoteId);
+                const swap = (id === basequote);
+                // 'positionCurrency' may be empty ("", as Bitmex currently returns for ETHUSD)
+                // so let's take the quote currency first and then adjust if needed
+                const positionId = this.safeString2 (market, 'positionCurrency', 'quoteCurrency');
+                let type = undefined;
+                let future = false;
+                let prediction = false;
+                let position = this.commonCurrencyCode (positionId);
+                let symbol = id;
+                if (swap) {
+                    type = 'swap';
+                    symbol = base + '/' + quote;
+                } else if (id.indexOf ('B_') >= 0) {
+                    prediction = true;
+                    type = 'prediction';
+                } else {
+                    future = true;
+                    type = 'future';
+                }
+                const precision = {
+                    'amount': undefined,
+                    'price': undefined,
+                };
+                const lotSize = this.safeFloat (market, 'lotSize');
+                const tickSize = this.safeFloat (market, 'tickSize');
+                if (lotSize !== undefined) {
+                    precision['amount'] = this.precisionFromString (this.truncate_to_string (lotSize, 16));
+                }
+                if (tickSize !== undefined) {
+                    precision['price'] = this.precisionFromString (this.truncate_to_string (tickSize, 16));
+                }
+                const limits = {
+                    'amount': {
+                        'min': undefined,
+                        'max': undefined,
+                    },
+                    'price': {
+                        'min': tickSize,
+                        'max': this.safeFloat (market, 'maxPrice'),
+                    },
+                    'cost': {
+                        'min': undefined,
+                        'max': undefined,
+                    },
+                };
+                const limitField = (position === quote) ? 'cost' : 'amount';
+                limits[limitField] = {
+                    'min': lotSize,
+                    'max': this.safeFloat (market, 'maxOrderQty'),
+                };
+                result.push ({
+                    'id': id,
+                    'symbol': symbol,
+                    'base': base,
+                    'quote': quote,
+                    'baseId': baseId,
+                    'quoteId': quoteId,
+                    'active': active,
+                    'precision': precision,
+                    'limits': limits,
+                    'taker': market['takerFee'],
+                    'maker': market['makerFee'],
+                    'type': type,
+                    'spot': false,
+                    'swap': swap,
+                    'future': future,
+                    'prediction': prediction,
+                    'info': market,
+                });
             }
-            const precision = {
-                'amount': undefined,
-                'price': undefined,
-            };
-            const lotSize = this.safeFloat (market, 'lotSize');
-            const tickSize = this.safeFloat (market, 'tickSize');
-            if (lotSize !== undefined) {
-                precision['amount'] = this.precisionFromString (this.truncate_to_string (lotSize, 16));
-            }
-            if (tickSize !== undefined) {
-                precision['price'] = this.precisionFromString (this.truncate_to_string (tickSize, 16));
-            }
-            const limits = {
-                'amount': {
-                    'min': undefined,
-                    'max': undefined,
-                },
-                'price': {
-                    'min': tickSize,
-                    'max': this.safeFloat (market, 'maxPrice'),
-                },
-                'cost': {
-                    'min': undefined,
-                    'max': undefined,
-                },
-            };
-            const limitField = (position === quote) ? 'cost' : 'amount';
-            limits[limitField] = {
-                'min': lotSize,
-                'max': this.safeFloat (market, 'maxOrderQty'),
-            };
-            result.push ({
-                'id': id,
-                'symbol': symbol,
-                'base': base,
-                'quote': quote,
-                'baseId': baseId,
-                'quoteId': quoteId,
-                'active': active,
-                'precision': precision,
-                'limits': limits,
-                'taker': market['takerFee'],
-                'maker': market['makerFee'],
-                'type': type,
-                'spot': false,
-                'swap': swap,
-                'future': future,
-                'prediction': prediction,
-                'info': market,
-            });
+            // Storing markets in Redis
+            await redisWrite(this.id + '|markets', result, false, 60 * 10);
+            return result;
         }
-        return result;
     }
 
     async fetchBalance (params = {}) {
