@@ -4,6 +4,7 @@
 
 const Exchange = require ('./base/Exchange');
 const { ExchangeError, ArgumentsRequired, InvalidNonce, OrderNotFound, InvalidOrder, InsufficientFunds, AuthenticationError, DDoSProtection } = require ('./base/errors');
+const { redisRead, redisWrite } = require('../../../lib/utils');
 
 //  ---------------------------------------------------------------------------
 
@@ -166,103 +167,109 @@ module.exports = class liquid extends Exchange {
     }
 
     async fetchMarkets (params = {}) {
-        let markets = await this.publicGetProducts ();
-        //
-        //     [
-        //         {
-        //             id: '7',
-        //             product_type: 'CurrencyPair',
-        //             code: 'CASH',
-        //             name: ' CASH Trading',
-        //             market_ask: 8865.79147,
-        //             market_bid: 8853.95988,
-        //             indicator: 1,
-        //             currency: 'SGD',
-        //             currency_pair_code: 'BTCSGD',
-        //             symbol: 'S$',
-        //             btc_minimum_withdraw: null,
-        //             fiat_minimum_withdraw: null,
-        //             pusher_channel: 'product_cash_btcsgd_7',
-        //             taker_fee: 0,
-        //             maker_fee: 0,
-        //             low_market_bid: '8803.25579',
-        //             high_market_ask: '8905.0',
-        //             volume_24h: '15.85443468',
-        //             last_price_24h: '8807.54625',
-        //             last_traded_price: '8857.77206',
-        //             last_traded_quantity: '0.00590974',
-        //             quoted_currency: 'SGD',
-        //             base_currency: 'BTC',
-        //             disabled: false,
-        //         },
-        //     ]
-        //
-        let currencies = await this.fetchCurrencies ();
-        let currenciesByCode = this.indexBy (currencies, 'code');
-        let result = [];
-        for (let i = 0; i < markets.length; i++) {
-            let market = markets[i];
-            let id = market['id'].toString ();
-            let baseId = market['base_currency'];
-            let quoteId = market['quoted_currency'];
-            let base = this.commonCurrencyCode (baseId);
-            let quote = this.commonCurrencyCode (quoteId);
-            let symbol = base + '/' + quote;
-            let maker = this.safeFloat (market, 'maker_fee');
-            let taker = this.safeFloat (market, 'taker_fee');
-            let active = !market['disabled'];
-            let baseCurrency = this.safeValue (currenciesByCode, base);
-            let quoteCurrency = this.safeValue (currenciesByCode, quote);
-            let precision = {
-                'amount': 8,
-                'price': 8,
-            };
-            let minAmount = undefined;
-            if (baseCurrency !== undefined) {
-                minAmount = this.safeFloat (baseCurrency['info'], 'minimum_order_quantity');
-                precision['amount'] = this.safeInteger (baseCurrency['info'], 'quoting_precision');
-            }
-            let minPrice = undefined;
-            if (quoteCurrency !== undefined) {
-                precision['price'] = this.safeInteger (quoteCurrency['info'], 'display_precision');
-                minPrice = Math.pow (10, -precision['price']);
-            }
-            let minCost = undefined;
-            if (minPrice !== undefined) {
-                if (minAmount !== undefined) {
-                    minCost = minPrice * minAmount;
+        let cacheData = await redisRead(this.id + '|markets');
+        if (cacheData) return cacheData;
+        else{
+            let markets = await this.publicGetProducts ();
+            //
+            //     [
+            //         {
+            //             id: '7',
+            //             product_type: 'CurrencyPair',
+            //             code: 'CASH',
+            //             name: ' CASH Trading',
+            //             market_ask: 8865.79147,
+            //             market_bid: 8853.95988,
+            //             indicator: 1,
+            //             currency: 'SGD',
+            //             currency_pair_code: 'BTCSGD',
+            //             symbol: 'S$',
+            //             btc_minimum_withdraw: null,
+            //             fiat_minimum_withdraw: null,
+            //             pusher_channel: 'product_cash_btcsgd_7',
+            //             taker_fee: 0,
+            //             maker_fee: 0,
+            //             low_market_bid: '8803.25579',
+            //             high_market_ask: '8905.0',
+            //             volume_24h: '15.85443468',
+            //             last_price_24h: '8807.54625',
+            //             last_traded_price: '8857.77206',
+            //             last_traded_quantity: '0.00590974',
+            //             quoted_currency: 'SGD',
+            //             base_currency: 'BTC',
+            //             disabled: false,
+            //         },
+            //     ]
+            //
+            let currencies = await this.fetchCurrencies ();
+            let currenciesByCode = this.indexBy (currencies, 'code');
+            let result = [];
+            for (let i = 0; i < markets.length; i++) {
+                let market = markets[i];
+                let id = market['id'].toString ();
+                let baseId = market['base_currency'];
+                let quoteId = market['quoted_currency'];
+                let base = this.commonCurrencyCode (baseId);
+                let quote = this.commonCurrencyCode (quoteId);
+                let symbol = base + '/' + quote;
+                let maker = this.safeFloat (market, 'maker_fee');
+                let taker = this.safeFloat (market, 'taker_fee');
+                let active = !market['disabled'];
+                let baseCurrency = this.safeValue (currenciesByCode, base);
+                let quoteCurrency = this.safeValue (currenciesByCode, quote);
+                let precision = {
+                    'amount': 8,
+                    'price': 8,
+                };
+                let minAmount = undefined;
+                if (baseCurrency !== undefined) {
+                    minAmount = this.safeFloat (baseCurrency['info'], 'minimum_order_quantity');
+                    precision['amount'] = this.safeInteger (baseCurrency['info'], 'quoting_precision');
                 }
+                let minPrice = undefined;
+                if (quoteCurrency !== undefined) {
+                    precision['price'] = this.safeInteger (quoteCurrency['info'], 'display_precision');
+                    minPrice = Math.pow (10, -precision['price']);
+                }
+                let minCost = undefined;
+                if (minPrice !== undefined) {
+                    if (minAmount !== undefined) {
+                        minCost = minPrice * minAmount;
+                    }
+                }
+                let limits = {
+                    'amount': {
+                        'min': minAmount,
+                        'max': undefined,
+                    },
+                    'price': {
+                        'min': minPrice,
+                        'max': undefined,
+                    },
+                    'cost': {
+                        'min': minCost,
+                        'max': undefined,
+                    },
+                };
+                result.push ({
+                    'id': id,
+                    'symbol': symbol,
+                    'base': base,
+                    'quote': quote,
+                    'baseId': baseId,
+                    'quoteId': quoteId,
+                    'maker': maker,
+                    'taker': taker,
+                    'limits': limits,
+                    'precision': precision,
+                    'active': active,
+                    'info': market,
+                });
             }
-            let limits = {
-                'amount': {
-                    'min': minAmount,
-                    'max': undefined,
-                },
-                'price': {
-                    'min': minPrice,
-                    'max': undefined,
-                },
-                'cost': {
-                    'min': minCost,
-                    'max': undefined,
-                },
-            };
-            result.push ({
-                'id': id,
-                'symbol': symbol,
-                'base': base,
-                'quote': quote,
-                'baseId': baseId,
-                'quoteId': quoteId,
-                'maker': maker,
-                'taker': taker,
-                'limits': limits,
-                'precision': precision,
-                'active': active,
-                'info': market,
-            });
-        }
-        return result;
+            // Storing markets in Redis
+            await redisWrite(this.id + '|markets', result, false, 60 * 10);
+            return result;
+        } 
     }
 
     async fetchBalance (params = {}) {

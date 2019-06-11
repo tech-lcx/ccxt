@@ -4,6 +4,7 @@
 
 const Exchange = require ('./base/Exchange');
 const { InsufficientFunds, ArgumentsRequired, ExchangeError, InvalidOrder, InvalidAddress, AuthenticationError, NotSupported, OrderNotFound } = require ('./base/errors');
+const { redisRead, redisWrite } = require('../../../lib/utils');
 
 // ----------------------------------------------------------------------------
 
@@ -153,54 +154,61 @@ module.exports = class gdax extends Exchange {
     }
 
     async fetchMarkets (params = {}) {
-        const response = await this.publicGetProducts (params);
-        const result = [];
-        for (let i = 0; i < response.length; i++) {
-            const market = response[i];
-            const id = this.safeString (market, 'id');
-            const baseId = this.safeString (market, 'base_currency');
-            const quoteId = this.safeString (market, 'quote_currency');
-            const base = this.commonCurrencyCode (baseId);
-            const quote = this.commonCurrencyCode (quoteId);
-            const symbol = base + '/' + quote;
-            const priceLimits = {
-                'min': this.safeFloat (market, 'quote_increment'),
-                'max': undefined,
-            };
-            const precision = {
-                'amount': 8,
-                'price': this.precisionFromString (this.safeString (market, 'quote_increment')),
-            };
-            let taker = this.fees['trading']['taker'];  // does not seem right
-            if ((base === 'ETH') || (base === 'LTC')) {
-                taker = 0.003;
+        let cacheData = await redisRead(this.id + '|markets');
+        if (cacheData) return cacheData;
+        else {
+            const response = await this.publicGetProducts (params);
+            const result = [];
+            for (let i = 0; i < response.length; i++) {
+                const market = response[i];
+                const id = this.safeString (market, 'id');
+                const baseId = this.safeString (market, 'base_currency');
+                const quoteId = this.safeString (market, 'quote_currency');
+                const base = this.commonCurrencyCode (baseId);
+                const quote = this.commonCurrencyCode (quoteId);
+                const symbol = base + '/' + quote;
+                const priceLimits = {
+                    'min': this.safeFloat (market, 'quote_increment'),
+                    'max': undefined,
+                };
+                const precision = {
+                    'amount': 8,
+                    'price': this.precisionFromString (this.safeString (market, 'quote_increment')),
+                };
+                let taker = this.fees['trading']['taker'];  // does not seem right
+                if ((base === 'ETH') || (base === 'LTC')) {
+                    taker = 0.003;
+                }
+                const active = market['status'] === 'online';
+                result.push (this.extend (this.fees['trading'], {
+                    'id': id,
+                    'symbol': symbol,
+                    'baseId': baseId,
+                    'quoteId': quoteId,
+                    'base': base,
+                    'quote': quote,
+                    'precision': precision,
+                    'limits': {
+                        'amount': {
+                            'min': this.safeFloat (market, 'base_min_size'),
+                            'max': this.safeFloat (market, 'base_max_size'),
+                        },
+                        'price': priceLimits,
+                        'cost': {
+                            'min': this.safeFloat (market, 'min_market_funds'),
+                            'max': this.safeFloat (market, 'max_market_funds'),
+                        },
+                    },
+                    'taker': taker,
+                    'active': active,
+                    'info': market,
+                }));
             }
-            const active = market['status'] === 'online';
-            result.push (this.extend (this.fees['trading'], {
-                'id': id,
-                'symbol': symbol,
-                'baseId': baseId,
-                'quoteId': quoteId,
-                'base': base,
-                'quote': quote,
-                'precision': precision,
-                'limits': {
-                    'amount': {
-                        'min': this.safeFloat (market, 'base_min_size'),
-                        'max': this.safeFloat (market, 'base_max_size'),
-                    },
-                    'price': priceLimits,
-                    'cost': {
-                        'min': this.safeFloat (market, 'min_market_funds'),
-                        'max': this.safeFloat (market, 'max_market_funds'),
-                    },
-                },
-                'taker': taker,
-                'active': active,
-                'info': market,
-            }));
+            // Storing markets in Redis
+            await redisWrite(this.id + '|markets', result, false, 60 * 10);
+            return result;
         }
-        return result;
+        
     }
 
     async fetchAccounts (params = {}) {
