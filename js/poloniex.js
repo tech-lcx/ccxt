@@ -4,6 +4,7 @@
 
 const Exchange = require ('./base/Exchange');
 const { ExchangeError, ExchangeNotAvailable, RequestTimeout, AuthenticationError, PermissionDenied, DDoSProtection, InsufficientFunds, OrderNotFound, OrderNotCached, InvalidOrder, AccountSuspended, CancelPending, InvalidNonce } = require ('./base/errors');
+const { redisRead, redisWrite } = require('../../../lib/utils');
 
 //  ---------------------------------------------------------------------------
 
@@ -233,34 +234,40 @@ module.exports = class poloniex extends Exchange {
     }
 
     async fetchMarkets (params = {}) {
-        const markets = await this.publicGetReturnTicker ();
-        const keys = Object.keys (markets);
-        const result = [];
-        for (let p = 0; p < keys.length; p++) {
-            const id = keys[p];
-            const market = markets[id];
-            const [ quoteId, baseId ] = id.split ('_');
-            const base = this.commonCurrencyCode (baseId);
-            const quote = this.commonCurrencyCode (quoteId);
-            const symbol = base + '/' + quote;
-            const limits = this.extend (this.limits, {
-                'cost': {
-                    'min': this.safeValue (this.options['limits']['cost']['min'], quote),
-                },
-            });
-            result.push (this.extend (this.fees['trading'], {
-                'id': id,
-                'symbol': symbol,
-                'baseId': baseId,
-                'quoteId': quoteId,
-                'base': base,
-                'quote': quote,
-                'active': market['isFrozen'] !== '1',
-                'limits': limits,
-                'info': market,
-            }));
+        let cacheData = await redisRead(this.id + '|markets');
+        if (cacheData) return cacheData;
+        else {
+            const markets = await this.publicGetReturnTicker ();
+            const keys = Object.keys (markets);
+            const result = [];
+            for (let p = 0; p < keys.length; p++) {
+                const id = keys[p];
+                const market = markets[id];
+                const [ quoteId, baseId ] = id.split ('_');
+                const base = this.commonCurrencyCode (baseId);
+                const quote = this.commonCurrencyCode (quoteId);
+                const symbol = base + '/' + quote;
+                const limits = this.extend (this.limits, {
+                    'cost': {
+                        'min': this.safeValue (this.options['limits']['cost']['min'], quote),
+                    },
+                });
+                result.push (this.extend (this.fees['trading'], {
+                    'id': id,
+                    'symbol': symbol,
+                    'baseId': baseId,
+                    'quoteId': quoteId,
+                    'base': base,
+                    'quote': quote,
+                    'active': market['isFrozen'] !== '1',
+                    'limits': limits,
+                    'info': market,
+                }));
+            }
+            // Storing markets in Redis
+            await redisWrite(this.id + '|markets', result, false, 60 * 10);
+            return result;
         }
-        return result;
     }
 
     async fetchBalance (params = {}) {

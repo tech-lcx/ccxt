@@ -4,6 +4,7 @@
 
 const Exchange = require ('./base/Exchange');
 const { ExchangeError, ExchangeNotAvailable, ArgumentsRequired, BadRequest, AccountSuspended, InvalidAddress, PermissionDenied, DDoSProtection, InsufficientFunds, InvalidNonce, CancelPending, InvalidOrder, OrderNotFound, AuthenticationError, RequestTimeout, NotSupported } = require ('./base/errors');
+const { redisRead, redisWrite } = require('../../../lib/utils');
 
 //  ---------------------------------------------------------------------------
 
@@ -465,13 +466,19 @@ module.exports = class okex3 extends Exchange {
     }
 
     async fetchMarkets (params = {}) {
-        const types = this.safeValue (this.options, 'fetchMarkets');
-        let result = [];
-        for (let i = 0; i < types.length; i++) {
-            const markets = await this.fetchMarketsByType (types[i], params);
-            result = this.arrayConcat (result, markets);
+        let cacheData = await redisRead(this.id + '|markets');
+        if (cacheData) return cacheData;
+        else {
+            const types = this.safeValue (this.options, 'fetchMarkets');
+            let result = [];
+            for (let i = 0; i < types.length; i++) {
+                const markets = await this.fetchMarketsByType (types[i], params);
+                result = this.arrayConcat (result, markets);
+            }
+            // Storing markets in Redis
+            await redisWrite(this.id + '|markets', result, false, 60 * 10);
+            return result;
         }
-        return result;
     }
 
     async parseMarkets (markets) {
