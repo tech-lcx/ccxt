@@ -24,6 +24,7 @@ module.exports = class liquid extends Exchange {
                 'fetchOpenOrders': true,
                 'fetchClosedOrders': true,
                 'fetchMyTrades': true,
+                'fetchOHLCV':true
             },
             'urls': {
                 'logo': 'https://user-images.githubusercontent.com/1294454/45798859-1a872600-bcb4-11e8-8746-69291ce87b04.jpg',
@@ -45,6 +46,7 @@ module.exports = class liquid extends Exchange {
                         'products/{id}/price_levels',
                         'executions',
                         'ir_ladders/{currency}',
+                        'products/{id}/ohlc'
                     ],
                 },
                 'private': {
@@ -65,7 +67,7 @@ module.exports = class liquid extends Exchange {
                         'trades/{id}/loans',
                         'trading_accounts',
                         'trading_accounts/{id}',
-                        'transactions',
+                        'transactions'
                     ],
                     'post': [
                         'fiat_accounts',
@@ -84,6 +86,19 @@ module.exports = class liquid extends Exchange {
                     ],
                 },
             },
+            'timeframes': {
+              '1m': '60',
+              '5m': '300',
+              '15m': '900',
+              '30m': '1800',
+              '1h': '3600',
+              '2h': '7200',
+              '4h': '14400',
+              '6h': '21600',
+              '1d': '86400',
+              '3d': '259200',
+              '1w': '604800'
+          },
             'skipJsonOnStatusCodes': [401],
             'exceptions': {
                 'API rate limit exceeded. Please retry after 300s': DDoSProtection,
@@ -269,7 +284,7 @@ module.exports = class liquid extends Exchange {
             // Storing markets in Redis
             await redisWrite(this.id + '|markets', result, false, 60 * 10);
             return result;
-        } 
+        }
     }
 
     async fetchBalance (params = {}) {
@@ -617,6 +632,19 @@ module.exports = class liquid extends Exchange {
     fetchClosedOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
         return this.fetchOrders (symbol, since, limit, this.extend ({ 'status': 'closed' }, params));
     }
+
+    async fetchOHLCV (symbol, timeframe = '1m', since = undefined, limit = undefined, params = {}) {
+      await this.loadMarkets ();
+      const market = this.market (symbol);
+      const marketId = market['id'];
+      const request = {
+          'id': marketId,
+          'resolution': this.timeframes[timeframe]
+      };
+      const response = await this.publicGetProductsIdOhlc (this.extend (request, params));
+      const responseData = response['data'];
+      return this.parseOHLCVs (responseData, market, timeframe, since, limit);
+  }
 
     nonce () {
         return this.milliseconds ();
