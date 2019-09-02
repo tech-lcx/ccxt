@@ -793,6 +793,7 @@ module.exports = class upbit extends Exchange {
 
     async fetchOHLCV (symbol, timeframe = '1m', since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
+        var time = params.since;
         let market = this.market (symbol);
         let timeframePeriod = this.parseTimeframe (timeframe);
         let timeframeValue = this.timeframes[timeframe];
@@ -804,6 +805,10 @@ module.exports = class upbit extends Exchange {
             'timeframe': timeframeValue,
             'count': limit,
         };
+        if (time !== undefined) {
+            // convert `since` to `to` value
+            request['to'] = this.iso8601 (this.sum (since, timeframePeriod * limit * 1000));
+        }
         let method = 'publicGetCandlesTimeframe';
         if (timeframeValue === 'minutes') {
             let numMinutes = Math.round (timeframePeriod / 60);
