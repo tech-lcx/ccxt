@@ -4,6 +4,7 @@
 
 const Exchange = require ('./base/Exchange');
 const { ExchangeError, ArgumentsRequired } = require ('./base/errors');
+const { redisRead, redisWrite } = require('../../../lib/utils');
 
 //  ---------------------------------------------------------------------------
 
@@ -86,24 +87,30 @@ module.exports = class gemini extends Exchange {
     }
 
     async fetchMarkets (params = {}) {
-        let markets = await this.publicGetSymbols ();
-        let result = [];
-        for (let p = 0; p < markets.length; p++) {
-            let id = markets[p];
-            let market = id;
-            let uppercase = market.toUpperCase ();
-            let base = uppercase.slice (0, 3);
-            let quote = uppercase.slice (3, 6);
-            let symbol = base + '/' + quote;
-            result.push ({
-                'id': id,
-                'symbol': symbol,
-                'base': base,
-                'quote': quote,
-                'info': market,
-            });
+        let cacheData = await redisRead(this.id + '|markets');
+        if (cacheData) return cacheData;
+        else {
+            let markets = await this.publicGetSymbols ();
+            let result = [];
+            for (let p = 0; p < markets.length; p++) {
+                let id = markets[p];
+                let market = id;
+                let uppercase = market.toUpperCase ();
+                let base = uppercase.slice (0, 3);
+                let quote = uppercase.slice (3, 6);
+                let symbol = base + '/' + quote;
+                result.push ({
+                    'id': id,
+                    'symbol': symbol,
+                    'base': base,
+                    'quote': quote,
+                    'info': market,
+                });
+            }
+            // Storing markets in Redis
+            await redisWrite(this.id + '|markets', result, false, 60 * 10);
+            return result;
         }
-        return result;
     }
 
     async fetchOrderBook (symbol, limit = undefined, params = {}) {

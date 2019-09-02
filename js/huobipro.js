@@ -4,7 +4,7 @@
 
 const Exchange = require ('./base/Exchange');
 const { ArgumentsRequired, AuthenticationError, ExchangeError, ExchangeNotAvailable, InvalidOrder, OrderNotFound, InsufficientFunds } = require ('./base/errors');
-
+const { redisRead, redisWrite } = require('../../../lib/utils');
 //  ---------------------------------------------------------------------------
 
 module.exports = class huobipro extends Exchange {
@@ -225,58 +225,64 @@ module.exports = class huobipro extends Exchange {
     }
 
     async fetchMarkets (params = {}) {
-        let method = this.options['fetchMarketsMethod'];
-        let response = await this[method] ();
-        let markets = response['data'];
-        let numMarkets = markets.length;
-        if (numMarkets < 1)
-            throw new ExchangeError (this.id + ' publicGetCommonSymbols returned empty response: ' + this.json (markets));
-        let result = [];
-        for (let i = 0; i < markets.length; i++) {
-            let market = markets[i];
-            let baseId = market['base-currency'];
-            let quoteId = market['quote-currency'];
-            let base = baseId.toUpperCase ();
-            let quote = quoteId.toUpperCase ();
-            let id = baseId + quoteId;
-            base = this.commonCurrencyCode (base);
-            quote = this.commonCurrencyCode (quote);
-            let symbol = base + '/' + quote;
-            let precision = {
-                'amount': market['amount-precision'],
-                'price': market['price-precision'],
-            };
-            let maker = (base === 'OMG') ? 0 : 0.2 / 100;
-            let taker = (base === 'OMG') ? 0 : 0.2 / 100;
-            result.push ({
-                'id': id,
-                'symbol': symbol,
-                'base': base,
-                'quote': quote,
-                'baseId': baseId,
-                'quoteId': quoteId,
-                'active': true,
-                'precision': precision,
-                'taker': taker,
-                'maker': maker,
-                'limits': {
-                    'amount': {
-                        'min': Math.pow (10, -precision['amount']),
-                        'max': undefined,
+        let cacheData = await redisRead(this.id + '|markets');
+        if (cacheData) return cacheData;
+        else {
+            let method = this.options['fetchMarketsMethod'];
+            let response = await this[method] ();
+            let markets = response['data'];
+            let numMarkets = markets.length;
+            if (numMarkets < 1)
+                throw new ExchangeError (this.id + ' publicGetCommonSymbols returned empty response: ' + this.json (markets));
+            let result = [];
+            for (let i = 0; i < markets.length; i++) {
+                let market = markets[i];
+                let baseId = market['base-currency'];
+                let quoteId = market['quote-currency'];
+                let base = baseId.toUpperCase ();
+                let quote = quoteId.toUpperCase ();
+                let id = baseId + quoteId;
+                base = this.commonCurrencyCode (base);
+                quote = this.commonCurrencyCode (quote);
+                let symbol = base + '/' + quote;
+                let precision = {
+                    'amount': market['amount-precision'],
+                    'price': market['price-precision'],
+                };
+                let maker = (base === 'OMG') ? 0 : 0.2 / 100;
+                let taker = (base === 'OMG') ? 0 : 0.2 / 100;
+                result.push ({
+                    'id': id,
+                    'symbol': symbol,
+                    'base': base,
+                    'quote': quote,
+                    'baseId': baseId,
+                    'quoteId': quoteId,
+                    'active': true,
+                    'precision': precision,
+                    'taker': taker,
+                    'maker': maker,
+                    'limits': {
+                        'amount': {
+                            'min': Math.pow (10, -precision['amount']),
+                            'max': undefined,
+                        },
+                        'price': {
+                            'min': Math.pow (10, -precision['price']),
+                            'max': undefined,
+                        },
+                        'cost': {
+                            'min': 0,
+                            'max': undefined,
+                        },
                     },
-                    'price': {
-                        'min': Math.pow (10, -precision['price']),
-                        'max': undefined,
-                    },
-                    'cost': {
-                        'min': 0,
-                        'max': undefined,
-                    },
-                },
-                'info': market,
-            });
+                    'info': market,
+                });
+            }
+            // Storing markets in Redis
+            await redisWrite(this.id + '|markets', result, false, 60 * 10);
+            return result;
         }
-        return result;
     }
 
     parseTicker (ticker, market = undefined) {
