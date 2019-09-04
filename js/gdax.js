@@ -4,6 +4,7 @@
 
 const Exchange = require ('./base/Exchange');
 const { InsufficientFunds, ArgumentsRequired, ExchangeError, InvalidOrder, InvalidAddress, AuthenticationError, NotSupported, OrderNotFound } = require ('./base/errors');
+const { redisRead, redisWrite } = require('../../../lib/utils');
 
 // ----------------------------------------------------------------------------
 
@@ -22,12 +23,10 @@ module.exports = class gdax extends Exchange {
                 'fetchAccounts': true,
                 'fetchClosedOrders': true,
                 'fetchDepositAddress': true,
-                'createDepositAddress': true,
                 'fetchMyTrades': true,
                 'fetchOHLCV': true,
                 'fetchOpenOrders': true,
                 'fetchOrder': true,
-                'fetchOrderTrades': true,
                 'fetchOrders': true,
                 'fetchTransactions': true,
                 'withdraw': true,
@@ -77,7 +76,6 @@ module.exports = class gdax extends Exchange {
                         'accounts/{id}/ledger',
                         'accounts/{id}/transfers',
                         'coinbase-accounts',
-                        'coinbase-accounts/{id}/addresses',
                         'fills',
                         'funding',
                         'orders',
@@ -156,54 +154,61 @@ module.exports = class gdax extends Exchange {
     }
 
     async fetchMarkets (params = {}) {
-        const response = await this.publicGetProducts (params);
-        const result = [];
-        for (let i = 0; i < response.length; i++) {
-            const market = response[i];
-            const id = this.safeString (market, 'id');
-            const baseId = this.safeString (market, 'base_currency');
-            const quoteId = this.safeString (market, 'quote_currency');
-            const base = this.safeCurrencyCode (baseId);
-            const quote = this.safeCurrencyCode (quoteId);
-            const symbol = base + '/' + quote;
-            const priceLimits = {
-                'min': this.safeFloat (market, 'quote_increment'),
-                'max': undefined,
-            };
-            const precision = {
-                'amount': this.precisionFromString (this.safeString (market, 'base_increment')),
-                'price': this.precisionFromString (this.safeString (market, 'quote_increment')),
-            };
-            let taker = this.fees['trading']['taker'];  // does not seem right
-            if ((base === 'ETH') || (base === 'LTC')) {
-                taker = 0.003;
+        let cacheData = await redisRead(this.id + '|markets');
+        if (cacheData) return cacheData;
+        else {
+            const response = await this.publicGetProducts (params);
+            const result = [];
+            for (let i = 0; i < response.length; i++) {
+                const market = response[i];
+                const id = this.safeString (market, 'id');
+                const baseId = this.safeString (market, 'base_currency');
+                const quoteId = this.safeString (market, 'quote_currency');
+                const base = this.commonCurrencyCode (baseId);
+                const quote = this.commonCurrencyCode (quoteId);
+                const symbol = base + '/' + quote;
+                const priceLimits = {
+                    'min': this.safeFloat (market, 'quote_increment'),
+                    'max': undefined,
+                };
+                const precision = {
+                    'amount': 8,
+                    'price': this.precisionFromString (this.safeString (market, 'quote_increment')),
+                };
+                let taker = this.fees['trading']['taker'];  // does not seem right
+                if ((base === 'ETH') || (base === 'LTC')) {
+                    taker = 0.003;
+                }
+                const active = market['status'] === 'online';
+                result.push (this.extend (this.fees['trading'], {
+                    'id': id,
+                    'symbol': symbol,
+                    'baseId': baseId,
+                    'quoteId': quoteId,
+                    'base': base,
+                    'quote': quote,
+                    'precision': precision,
+                    'limits': {
+                        'amount': {
+                            'min': this.safeFloat (market, 'base_min_size'),
+                            'max': this.safeFloat (market, 'base_max_size'),
+                        },
+                        'price': priceLimits,
+                        'cost': {
+                            'min': this.safeFloat (market, 'min_market_funds'),
+                            'max': this.safeFloat (market, 'max_market_funds'),
+                        },
+                    },
+                    'taker': taker,
+                    'active': active,
+                    'info': market,
+                }));
             }
-            const active = market['status'] === 'online';
-            result.push (this.extend (this.fees['trading'], {
-                'id': id,
-                'symbol': symbol,
-                'baseId': baseId,
-                'quoteId': quoteId,
-                'base': base,
-                'quote': quote,
-                'precision': precision,
-                'limits': {
-                    'amount': {
-                        'min': this.safeFloat (market, 'base_min_size'),
-                        'max': this.safeFloat (market, 'base_max_size'),
-                    },
-                    'price': priceLimits,
-                    'cost': {
-                        'min': this.safeFloat (market, 'min_market_funds'),
-                        'max': this.safeFloat (market, 'max_market_funds'),
-                    },
-                },
-                'taker': taker,
-                'active': active,
-                'info': market,
-            }));
+            // Storing markets in Redis
+            await redisWrite(this.id + '|markets', result, false, 60 * 10);
+            return result;
         }
-        return result;
+        
     }
 
     async fetchAccounts (params = {}) {
@@ -233,7 +238,7 @@ module.exports = class gdax extends Exchange {
             const account = response[i];
             const accountId = this.safeString (account, 'id');
             const currencyId = this.safeString (account, 'currency');
-            const code = this.safeCurrencyCode (currencyId);
+            const code = this.commonCurrencyCode (currencyId);
             result.push ({
                 'id': accountId,
                 'type': undefined,
@@ -246,43 +251,45 @@ module.exports = class gdax extends Exchange {
 
     async fetchBalance (params = {}) {
         await this.loadMarkets ();
-        const response = await this.privateGetAccounts (params);
-        const result = { 'info': response };
-        for (let i = 0; i < response.length; i++) {
-            const balance = response[i];
-            const currencyId = this.safeString (balance, 'currency');
-            const code = this.safeCurrencyCode (currencyId);
-            const account = {
+        let balances = await this.privateGetAccounts (params);
+        let result = { 'info': balances };
+        for (let b = 0; b < balances.length; b++) {
+            let balance = balances[b];
+            let currency = balance['currency'];
+            let account = {
                 'free': this.safeFloat (balance, 'available'),
                 'used': this.safeFloat (balance, 'hold'),
                 'total': this.safeFloat (balance, 'balance'),
             };
-            result[code] = account;
+            result[currency] = account;
         }
         return this.parseBalance (result);
     }
 
     async fetchOrderBook (symbol, limit = undefined, params = {}) {
         await this.loadMarkets ();
-        const request = {
+        let orderbook = await this.publicGetProductsIdBook (this.extend ({
             'id': this.marketId (symbol),
             'level': 2, // 1 best bidask, 2 aggregated, 3 full
-        };
-        const response = await this.publicGetProductsIdBook (this.extend (request, params));
-        return this.parseOrderBook (response);
+        }, params));
+        return this.parseOrderBook (orderbook);
     }
 
     async fetchTicker (symbol, params = {}) {
         await this.loadMarkets ();
-        const market = this.market (symbol);
-        const request = {
+        let market = this.market (symbol);
+        let request = this.extend ({
             'id': market['id'],
-        };
-        const ticker = await this.publicGetProductsIdTicker (this.extend (request, params));
-        const timestamp = this.parse8601 (this.safeValue (ticker, 'time'));
-        const bid = this.safeFloat (ticker, 'bid');
-        const ask = this.safeFloat (ticker, 'ask');
-        const last = this.safeFloat (ticker, 'price');
+        }, params);
+        let ticker = await this.publicGetProductsIdTicker (request);
+        let timestamp = this.parse8601 (this.safeValue (ticker, 'time'));
+        let bid = undefined;
+        let ask = undefined;
+        if ('bid' in ticker)
+            bid = this.safeFloat (ticker, 'bid');
+        if ('ask' in ticker)
+            ask = this.safeFloat (ticker, 'ask');
+        let last = this.safeFloat (ticker, 'price');
         return {
             'symbol': symbol,
             'timestamp': timestamp,
@@ -308,15 +315,14 @@ module.exports = class gdax extends Exchange {
     }
 
     parseTrade (trade, market = undefined) {
-        const timestamp = this.parse8601 (this.safeString2 (trade, 'time', 'created_at'));
+        let timestamp = this.parse8601 (this.safeString2 (trade, 'time', 'created_at'));
         let symbol = undefined;
         if (market === undefined) {
-            const marketId = this.safeString (trade, 'product_id');
+            let marketId = this.safeString (trade, 'product_id');
             market = this.safeValue (this.markets_by_id, marketId);
         }
-        if (market) {
+        if (market)
             symbol = market['symbol'];
-        }
         let feeRate = undefined;
         let feeCurrency = undefined;
         let takerOrMaker = undefined;
@@ -327,22 +333,23 @@ module.exports = class gdax extends Exchange {
                 feeRate = market[takerOrMaker];
             }
         }
-        const feeCost = this.safeFloat2 (trade, 'fill_fees', 'fee');
-        const fee = {
+        let feeCost = this.safeFloat (trade, 'fill_fees');
+        if (feeCost === undefined)
+            feeCost = this.safeFloat (trade, 'fee');
+        let fee = {
             'cost': feeCost,
             'currency': feeCurrency,
             'rate': feeRate,
         };
-        const type = undefined;
-        const id = this.safeString (trade, 'trade_id');
+        let type = undefined;
+        let id = this.safeString (trade, 'trade_id');
         let side = (trade['side'] === 'buy') ? 'sell' : 'buy';
-        const orderId = this.safeString (trade, 'order_id');
+        let orderId = this.safeString (trade, 'order_id');
         // GDAX returns inverted side to fetchMyTrades vs fetchTrades
-        if (orderId !== undefined) {
+        if (orderId !== undefined)
             side = (trade['side'] === 'buy') ? 'buy' : 'sell';
-        }
-        const price = this.safeFloat (trade, 'price');
-        const amount = this.safeFloat (trade, 'size');
+        let price = this.safeFloat (trade, 'price');
+        let amount = this.safeFloat (trade, 'size');
         return {
             'id': id,
             'order': orderId,
@@ -366,24 +373,22 @@ module.exports = class gdax extends Exchange {
             throw new ArgumentsRequired (this.id + ' fetchMyTrades requires a symbol argument');
         }
         await this.loadMarkets ();
-        const market = this.market (symbol);
-        const request = {
+        let market = this.market (symbol);
+        let request = {
             'product_id': market['id'],
         };
-        if (limit !== undefined) {
+        if (limit !== undefined)
             request['limit'] = limit;
-        }
-        const response = await this.privateGetFills (this.extend (request, params));
+        let response = await this.privateGetFills (this.extend (request, params));
         return this.parseTrades (response, market, since, limit);
     }
 
     async fetchTrades (symbol, since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
-        const market = this.market (symbol);
-        const request = {
+        let market = this.market (symbol);
+        let response = await this.publicGetProductsIdTrades (this.extend ({
             'id': market['id'], // fixes issue #2
-        };
-        const response = await this.publicGetProductsIdTrades (this.extend (request, params));
+        }, params));
         return this.parseTrades (response, market, since, limit);
     }
 
@@ -400,9 +405,9 @@ module.exports = class gdax extends Exchange {
 
     async fetchOHLCV (symbol, timeframe = '1m', since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
-        const market = this.market (symbol);
-        const granularity = this.timeframes[timeframe];
-        const request = {
+        let market = this.market (symbol);
+        let granularity = this.timeframes[timeframe];
+        let request = {
             'id': market['id'],
             'granularity': granularity,
         };
@@ -414,17 +419,17 @@ module.exports = class gdax extends Exchange {
             }
             request['end'] = this.ymdhms (this.sum (limit * granularity * 1000, since));
         }
-        const response = await this.publicGetProductsIdCandles (this.extend (request, params));
+        let response = await this.publicGetProductsIdCandles (this.extend (request, params));
         return this.parseOHLCVs (response, market, timeframe, since, limit);
     }
 
     async fetchTime (params = {}) {
         const response = await this.publicGetTime (params);
-        return this.parse8601 (response, 'iso');
+        return this.parse8601 (this.parse8601 (response, 'iso'));
     }
 
     parseOrderStatus (status) {
-        const statuses = {
+        let statuses = {
             'pending': 'open',
             'active': 'open',
             'open': 'open',
@@ -436,57 +441,42 @@ module.exports = class gdax extends Exchange {
     }
 
     parseOrder (order, market = undefined) {
-        const timestamp = this.parse8601 (order['created_at']);
+        let timestamp = this.parse8601 (order['created_at']);
         let symbol = undefined;
         if (market === undefined) {
-            const marketId = this.safeString (order, 'product_id');
-            if (marketId in this.markets_by_id) {
-                market = this.markets_by_id[marketId];
-            }
+            if (order['product_id'] in this.markets_by_id)
+                market = this.markets_by_id[order['product_id']];
         }
-        const status = this.parseOrderStatus (this.safeString (order, 'status'));
-        const price = this.safeFloat (order, 'price');
-        let amount = this.safeFloat2 (order, 'size', 'funds');
-        if (amount === undefined) {
+        let status = this.parseOrderStatus (this.safeString (order, 'status'));
+        let price = this.safeFloat (order, 'price');
+        let amount = this.safeFloat (order, 'size');
+        if (amount === undefined)
+            amount = this.safeFloat (order, 'funds');
+        if (amount === undefined)
             amount = this.safeFloat (order, 'specified_funds');
-        }
-        const filled = this.safeFloat (order, 'filled_size');
+        let filled = this.safeFloat (order, 'filled_size');
         let remaining = undefined;
-        if (amount !== undefined) {
-            if (filled !== undefined) {
+        if (amount !== undefined)
+            if (filled !== undefined)
                 remaining = amount - filled;
-            }
-        }
-        const cost = this.safeFloat (order, 'executed_value');
-        const feeCost = this.safeFloat (order, 'fill_fees');
-        let fee = undefined;
-        if (feeCost !== undefined) {
-            let feeCurrencyCode = undefined;
-            if (market !== undefined) {
-                feeCurrencyCode = market['quote'];
-            }
-            fee = {
-                'cost': feeCost,
-                'currency': feeCurrencyCode,
-                'rate': undefined,
-            };
-        }
-        if (market !== undefined) {
+        let cost = this.safeFloat (order, 'executed_value');
+        let fee = {
+            'cost': this.safeFloat (order, 'fill_fees'),
+            'currency': undefined,
+            'rate': undefined,
+        };
+        if (market)
             symbol = market['symbol'];
-        }
-        const id = this.safeString (order, 'id');
-        const type = this.safeString (order, 'type');
-        const side = this.safeString (order, 'side');
         return {
-            'id': id,
+            'id': order['id'],
             'info': order,
             'timestamp': timestamp,
             'datetime': this.iso8601 (timestamp),
             'lastTradeTimestamp': undefined,
             'status': status,
             'symbol': symbol,
-            'type': type,
-            'side': side,
+            'type': order['type'],
+            'side': order['side'],
             'price': price,
             'cost': cost,
             'amount': amount,
@@ -498,29 +488,15 @@ module.exports = class gdax extends Exchange {
 
     async fetchOrder (id, symbol = undefined, params = {}) {
         await this.loadMarkets ();
-        const request = {
+        let response = await this.privateGetOrdersId (this.extend ({
             'id': id,
-        };
-        const response = await this.privateGetOrdersId (this.extend (request, params));
+        }, params));
         return this.parseOrder (response);
-    }
-
-    async fetchOrderTrades (id, symbol = undefined, since = undefined, limit = undefined, params = {}) {
-        await this.loadMarkets ();
-        let market = undefined;
-        if (symbol !== undefined) {
-            market = this.market (symbol);
-        }
-        const request = {
-            'order_id': id,
-        };
-        const response = await this.privateGetFills (this.extend (request, params));
-        return this.parseTrades (response, market, since, limit);
     }
 
     async fetchOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
-        const request = {
+        let request = {
             'status': 'all',
         };
         let market = undefined;
@@ -528,25 +504,25 @@ module.exports = class gdax extends Exchange {
             market = this.market (symbol);
             request['product_id'] = market['id'];
         }
-        const response = await this.privateGetOrders (this.extend (request, params));
+        let response = await this.privateGetOrders (this.extend (request, params));
         return this.parseOrders (response, market, since, limit);
     }
 
     async fetchOpenOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
-        const request = {};
+        let request = {};
         let market = undefined;
         if (symbol !== undefined) {
             market = this.market (symbol);
             request['product_id'] = market['id'];
         }
-        const response = await this.privateGetOrders (this.extend (request, params));
+        let response = await this.privateGetOrders (this.extend (request, params));
         return this.parseOrders (response, market, since, limit);
     }
 
     async fetchClosedOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
-        const request = {
+        let request = {
             'status': 'done',
         };
         let market = undefined;
@@ -554,23 +530,22 @@ module.exports = class gdax extends Exchange {
             market = this.market (symbol);
             request['product_id'] = market['id'];
         }
-        const response = await this.privateGetOrders (this.extend (request, params));
+        let response = await this.privateGetOrders (this.extend (request, params));
         return this.parseOrders (response, market, since, limit);
     }
 
     async createOrder (symbol, type, side, amount, price = undefined, params = {}) {
         await this.loadMarkets ();
         // let oid = this.nonce ().toString ();
-        const request = {
+        let order = {
             'product_id': this.marketId (symbol),
             'side': side,
             'size': this.amountToPrecision (symbol, amount),
             'type': type,
         };
-        if (type === 'limit') {
-            request['price'] = this.priceToPrecision (symbol, price);
-        }
-        const response = await this.privatePostOrders (this.extend (request, params));
+        if (type === 'limit')
+            order['price'] = this.priceToPrecision (symbol, price);
+        let response = await this.privatePostOrders (this.extend (order, params));
         return this.parseOrder (response);
     }
 
@@ -584,10 +559,10 @@ module.exports = class gdax extends Exchange {
     }
 
     calculateFee (symbol, type, side, amount, price, takerOrMaker = 'taker', params = {}) {
-        const market = this.markets[symbol];
-        const rate = market[takerOrMaker];
-        const cost = amount * price;
-        const currency = market['quote'];
+        let market = this.markets[symbol];
+        let rate = market[takerOrMaker];
+        let cost = amount * price;
+        let currency = market['quote'];
         return {
             'type': takerOrMaker,
             'currency': currency,
@@ -596,14 +571,15 @@ module.exports = class gdax extends Exchange {
         };
     }
 
-    async fetchPaymentMethods (params = {}) {
-        return await this.privateGetPaymentMethods (params);
+    async getPaymentMethods () {
+        let response = await this.privateGetPaymentMethods ();
+        return response;
     }
 
     async deposit (code, amount, address, params = {}) {
         await this.loadMarkets ();
-        const currency = this.currency (code);
-        const request = {
+        let currency = this.currency (code);
+        let request = {
             'currency': currency['id'],
             'amount': amount,
         };
@@ -620,10 +596,9 @@ module.exports = class gdax extends Exchange {
             // https://docs.gdax.com/#deposits
             throw new NotSupported (this.id + ' deposit() requires one of `coinbase_account_id` or `payment_method_id` extra params');
         }
-        const response = await this[method] (this.extend (request, params));
-        if (!response) {
+        let response = await this[method] (this.extend (request, params));
+        if (!response)
             throw new ExchangeError (this.id + ' deposit() error: ' + this.json (response));
-        }
         return {
             'info': response,
             'id': response['id'],
@@ -632,9 +607,9 @@ module.exports = class gdax extends Exchange {
 
     async withdraw (code, amount, address, tag = undefined, params = {}) {
         this.checkAddress (address);
+        let currency = this.currency (code);
         await this.loadMarkets ();
-        const currency = this.currency (code);
-        const request = {
+        let request = {
             'currency': currency['id'],
             'amount': amount,
         };
@@ -647,10 +622,9 @@ module.exports = class gdax extends Exchange {
             method += 'Crypto';
             request['crypto_address'] = address;
         }
-        const response = await this[method] (this.extend (request, params));
-        if (!response) {
+        let response = await this[method] (this.extend (request, params));
+        if (!response)
             throw new ExchangeError (this.id + ' withdraw() error: ' + this.json (response));
-        }
         return {
             'info': response,
             'id': response['id'],
@@ -680,7 +654,7 @@ module.exports = class gdax extends Exchange {
         if (limit !== undefined) {
             request['limit'] = limit;
         }
-        const response = await this.privateGetAccountsIdTransfers (this.extend (request, params));
+        let response = await this.privateGetAccountsIdTransfers (this.extend (request, params));
         for (let i = 0; i < response.length; i++) {
             response[i]['currency'] = code;
         }
@@ -688,18 +662,16 @@ module.exports = class gdax extends Exchange {
     }
 
     parseTransactionStatus (transaction) {
-        const canceled = this.safeValue (transaction, 'canceled_at');
-        if (canceled) {
+        if ('canceled_at' in transaction && transaction['canceled_at']) {
             return 'canceled';
-        }
-        const processed = this.safeValue (transaction, 'processed_at');
-        const completed = this.safeValue (transaction, 'completed_at');
-        if (completed) {
+        } else if ('completed_at' in transaction && transaction['completed_at']) {
             return 'ok';
-        } else if (processed && !completed) {
-            return 'failed';
-        } else {
+        } else if ((('canceled_at' in transaction) && !transaction['canceled_at']) && (('completed_at' in transaction) && !transaction['completed_at']) && (('processed_at' in transaction) && !transaction['processed_at'])) {
             return 'pending';
+        } else if ('processed_at' in transaction && transaction['processed_at']) {
+            return 'pending';
+        } else {
+            return 'failed';
         }
     }
 
@@ -709,14 +681,20 @@ module.exports = class gdax extends Exchange {
         const txid = this.safeString (details, 'crypto_transaction_hash');
         const timestamp = this.parse8601 (this.safeString (transaction, 'created_at'));
         const updated = this.parse8601 (this.safeString (transaction, 'processed_at'));
+        let code = undefined;
         const currencyId = this.safeString (transaction, 'currency');
-        const code = this.safeCurrencyCode (currencyId, currency);
-        const fee = undefined;
+        if (currencyId in this.currencies_by_id) {
+            currency = this.currencies_by_id[currencyId];
+            code = currency['code'];
+        } else {
+            code = this.commonCurrencyCode (currencyId);
+        }
+        let fee = undefined;
         const status = this.parseTransactionStatus (transaction);
         const amount = this.safeFloat (transaction, 'amount');
         let type = this.safeString (transaction, 'type');
         let address = this.safeString (details, 'crypto_address');
-        const tag = this.safeString (details, 'destination_tag');
+        let tag = this.safeString (details, 'destination_tag');
         address = this.safeString (transaction, 'crypto_address', address);
         if (type === 'withdraw') {
             type = 'withdrawal';
@@ -741,16 +719,15 @@ module.exports = class gdax extends Exchange {
 
     sign (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
         let request = '/' + this.implodeParams (path, params);
-        const query = this.omit (params, this.extractParams (path));
+        let query = this.omit (params, this.extractParams (path));
         if (method === 'GET') {
-            if (Object.keys (query).length) {
+            if (Object.keys (query).length)
                 request += '?' + this.urlencode (query);
-            }
         }
-        const url = this.urls['api'] + request;
+        let url = this.urls['api'] + request;
         if (api === 'private') {
             this.checkRequiredCredentials ();
-            const nonce = this.nonce ().toString ();
+            let nonce = this.nonce ().toString ();
             let payload = '';
             if (method !== 'GET') {
                 if (Object.keys (query).length) {
@@ -759,9 +736,9 @@ module.exports = class gdax extends Exchange {
                 }
             }
             // let payload = (body) ? body : '';
-            const what = nonce + method + request + payload;
-            const secret = this.base64ToBinary (this.secret);
-            const signature = this.hmac (this.encode (what), secret, 'sha256', 'base64');
+            let what = nonce + method + request + payload;
+            let secret = this.base64ToBinary (this.secret);
+            let signature = this.hmac (this.encode (what), secret, 'sha256', 'base64');
             headers = {
                 'CB-ACCESS-KEY': this.apiKey,
                 'CB-ACCESS-SIGN': this.decode (signature),
@@ -775,25 +752,24 @@ module.exports = class gdax extends Exchange {
 
     async fetchDepositAddress (code, params = {}) {
         await this.loadMarkets ();
-        const currency = this.currency (code);
+        let currency = this.currency (code);
         let accounts = this.safeValue (this.options, 'coinbaseAccounts');
         if (accounts === undefined) {
             accounts = await this.privateGetCoinbaseAccounts ();
             this.options['coinbaseAccounts'] = accounts; // cache it
             this.options['coinbaseAccountsByCurrencyId'] = this.indexBy (accounts, 'currency');
         }
-        const currencyId = currency['id'];
-        const account = this.safeValue (this.options['coinbaseAccountsByCurrencyId'], currencyId);
+        let currencyId = currency['id'];
+        let account = this.safeValue (this.options['coinbaseAccountsByCurrencyId'], currencyId);
         if (account === undefined) {
             // eslint-disable-next-line quotes
             throw new InvalidAddress (this.id + " fetchDepositAddress() could not find currency code " + code + " with id = " + currencyId + " in this.options['coinbaseAccountsByCurrencyId']");
         }
-        const request = {
+        let response = await this.privatePostCoinbaseAccountsIdAddresses (this.extend ({
             'id': account['id'],
-        };
-        const response = await this.privateGetCoinbaseAccountsIdAddresses (this.extend (request, params));
-        const address = this.safeString (response, 'address');
-        const tag = this.safeString (response, 'destination_tag');
+        }, params));
+        let address = this.safeString (response, 'address');
+        let tag = this.safeString (response, 'destination_tag');
         return {
             'currency': code,
             'address': this.checkAddress (address),
@@ -802,40 +778,11 @@ module.exports = class gdax extends Exchange {
         };
     }
 
-    async createDepositAddress (code, params = {}) {
-        await this.loadMarkets ();
-        const currency = this.currency (code);
-        let accounts = this.safeValue (this.options, 'coinbaseAccounts');
-        if (accounts === undefined) {
-            accounts = await this.privateGetCoinbaseAccounts ();
-            this.options['coinbaseAccounts'] = accounts; // cache it
-            this.options['coinbaseAccountsByCurrencyId'] = this.indexBy (accounts, 'currency');
-        }
-        const currencyId = currency['id'];
-        const account = this.safeValue (this.options['coinbaseAccountsByCurrencyId'], currencyId);
-        if (account === undefined) {
-            // eslint-disable-next-line quotes
-            throw new InvalidAddress (this.id + " fetchDepositAddress() could not find currency code " + code + " with id = " + currencyId + " in this.options['coinbaseAccountsByCurrencyId']");
-        }
-        const request = {
-            'id': account['id'],
-        };
-        const response = await this.privatePostCoinbaseAccountsIdAddresses (this.extend (request, params));
-        const address = this.safeString (response, 'address');
-        const tag = this.safeString (response, 'destination_tag');
-        return {
-            'currency': code,
-            'address': this.checkAddress (address),
-            'tag': tag,
-            'info': response,
-        };
-    }
-
-    handleErrors (code, reason, url, method, headers, body, response, requestHeaders, requestBody) {
+    handleErrors (code, reason, url, method, headers, body, response) {
         if ((code === 400) || (code === 404)) {
             if (body[0] === '{') {
-                const message = response['message'];
-                const feedback = this.id + ' ' + message;
+                let message = response['message'];
+                let feedback = this.id + ' ' + message;
                 const exact = this.exceptions['exact'];
                 if (message in exact) {
                     throw new exact[message] (feedback);
@@ -852,7 +799,7 @@ module.exports = class gdax extends Exchange {
     }
 
     async request (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
-        const response = await this.fetch2 (path, api, method, params, headers, body);
+        let response = await this.fetch2 (path, api, method, params, headers, body);
         if ('message' in response) {
             throw new ExchangeError (this.id + ' ' + this.json (response));
         }
