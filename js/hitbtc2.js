@@ -5,6 +5,8 @@
 const hitbtc = require ('./hitbtc');
 const { PermissionDenied, ExchangeError, ExchangeNotAvailable, OrderNotFound, InsufficientFunds, InvalidOrder } = require ('./base/errors');
 const { TRUNCATE, DECIMAL_PLACES } = require ('./base/functions/number');
+const { redisRead, redisWrite } = require('../../../lib/utils');
+
 // ---------------------------------------------------------------------------
 
 module.exports = class hitbtc2 extends hitbtc {
@@ -558,55 +560,62 @@ module.exports = class hitbtc2 extends hitbtc {
     }
 
     async fetchMarkets (params = {}) {
-        const response = await this.publicGetSymbol (params);
-        const result = [];
-        for (let i = 0; i < response.length; i++) {
-            const market = response[i];
-            const id = this.safeString (market, 'id');
-            const baseId = this.safeString (market, 'baseCurrency');
-            const quoteId = this.safeString (market, 'quoteCurrency');
-            const base = this.safeCurrencyCode (baseId);
-            const quote = this.safeCurrencyCode (quoteId);
-            const symbol = base + '/' + quote;
-            const lot = this.safeFloat (market, 'quantityIncrement');
-            const step = this.safeFloat (market, 'tickSize');
-            const precision = {
-                'price': this.precisionFromString (market['tickSize']),
-                // FIXME: for lots > 1 the following line returns 0
-                // 'amount': this.precisionFromString (market['quantityIncrement']),
-                'amount': -1 * parseInt (Math.log10 (lot)),
-            };
-            const taker = this.safeFloat (market, 'takeLiquidityRate');
-            const maker = this.safeFloat (market, 'provideLiquidityRate');
-            result.push (this.extend (this.fees['trading'], {
-                'info': market,
-                'id': id,
-                'symbol': symbol,
-                'base': base,
-                'quote': quote,
-                'baseId': baseId,
-                'quoteId': quoteId,
-                'active': true,
-                'taker': taker,
-                'maker': maker,
-                'precision': precision,
-                'limits': {
-                    'amount': {
-                        'min': lot,
-                        'max': undefined,
+        let cacheData = await redisRead(this.id + '|markets');
+        if (cacheData) return cacheData;
+        else {
+            const response = await this.publicGetSymbol (params);
+            const result = [];
+            for (let i = 0; i < response.length; i++) {
+                const market = response[i];
+                const id = this.safeString (market, 'id');
+                const baseId = this.safeString (market, 'baseCurrency');
+                const quoteId = this.safeString (market, 'quoteCurrency');
+                const base = this.safeCurrencyCode (baseId);
+                const quote = this.safeCurrencyCode (quoteId);
+                const symbol = base + '/' + quote;
+                const lot = this.safeFloat (market, 'quantityIncrement');
+                const step = this.safeFloat (market, 'tickSize');
+                const precision = {
+                    'price': this.precisionFromString (market['tickSize']),
+                    // FIXME: for lots > 1 the following line returns 0
+                    // 'amount': this.precisionFromString (market['quantityIncrement']),
+                    'amount': -1 * parseInt (Math.log10 (lot)),
+                };
+                const taker = this.safeFloat (market, 'takeLiquidityRate');
+                const maker = this.safeFloat (market, 'provideLiquidityRate');
+                result.push (this.extend (this.fees['trading'], {
+                    'info': market,
+                    'id': id,
+                    'symbol': symbol,
+                    'base': base,
+                    'quote': quote,
+                    'baseId': baseId,
+                    'quoteId': quoteId,
+                    'active': true,
+                    'taker': taker,
+                    'maker': maker,
+                    'precision': precision,
+                    'limits': {
+                        'amount': {
+                            'min': lot,
+                            'max': undefined,
+                        },
+                        'price': {
+                            'min': step,
+                            'max': undefined,
+                        },
+                        'cost': {
+                            'min': lot * step,
+                            'max': undefined,
+                        },
                     },
-                    'price': {
-                        'min': step,
-                        'max': undefined,
-                    },
-                    'cost': {
-                        'min': lot * step,
-                        'max': undefined,
-                    },
-                },
-            }));
+                }));
+            }
+            // Storing markets in Redis
+            await redisWrite(this.id + '|markets', result, false, 60 * 60);
+            return result;
         }
-        return result;
+        
     }
 
     async fetchCurrencies (params = {}) {

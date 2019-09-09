@@ -257,7 +257,7 @@ module.exports = class kucoin extends Exchange {
         });
       }
       // Storing markets in Redis
-      await redisWrite(this.id + '|markets', result, false, 60 * 10);
+      await redisWrite(this.id + '|markets', result, false, 60 * 60);
       return result;
     }
   }

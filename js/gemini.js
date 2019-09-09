@@ -163,7 +163,7 @@ module.exports = class gemini extends Exchange {
             const method = this.safeValue (this.options, 'fetchMarketsMethod', 'fetch_markets_from_api');
             let result = await this[method] (params);
              // Storing markets in Redis
-             await redisWrite(this.id + '|markets', result, false, 60 * 10);
+             await redisWrite(this.id + '|markets', result, false, 60 * 60);
              return result;
         }
         

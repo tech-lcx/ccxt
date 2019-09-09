@@ -4,6 +4,7 @@
 
 const Exchange = require ('./base/Exchange');
 const { AccountSuspended, BadRequest, BadResponse, NetworkError, DDoSProtection, AuthenticationError, PermissionDenied, ArgumentsRequired, ExchangeError, InsufficientFunds, InvalidOrder, InvalidNonce, OrderNotFound } = require ('./base/errors');
+const { redisRead, redisWrite } = require('../../../lib/utils');
 
 //  ---------------------------------------------------------------------------
 
@@ -223,64 +224,71 @@ module.exports = class digifinex extends Exchange {
     }
 
     async fetchMarkets (params = {}) {
-        const response = await this.publicGetMarkets (params);
-        //
-        //     {
-        //         "data": [
-        //             {
-        //                 "volume_precision":4,
-        //                 "price_precision":2,
-        //                 "market":"btc_usdt",
-        //                 "min_amount":2,
-        //                 "min_volume":0.0001
-        //             },
-        //         ],
-        //         "date":1564507456,
-        //         "code":0
-        //     }
-        //
-        const markets = this.safeValue (response, 'data', []);
-        const result = [];
-        for (let i = 0; i < markets.length; i++) {
-            const market = markets[i];
-            const id = this.safeString (market, 'market');
-            const [ baseId, quoteId ] = id.split ('_');
-            const base = this.safeCurrencyCode (baseId);
-            const quote = this.safeCurrencyCode (quoteId);
-            const symbol = base + '/' + quote;
-            const precision = {
-                'amount': this.safeInteger (market, 'volume_precision'),
-                'price': this.safeInteger (market, 'price_precision'),
-            };
-            const limits = {
-                'amount': {
-                    'min': this.safeFloat (market, 'min_volume'),
-                    'max': undefined,
-                },
-                'price': {
-                    'min': undefined,
-                    'max': undefined,
-                },
-                'cost': {
-                    'min': this.safeFloat (market, 'min_amount'),
-                    'max': undefined,
-                },
-            };
-            const active = undefined;
-            result.push ({
-                'id': id,
-                'symbol': symbol,
-                'base': base,
-                'quote': quote,
-                'baseId': baseId,
-                'quoteId': quoteId,
-                'active': active,
-                'precision': precision,
-                'limits': limits,
-                'info': market,
-            });
+        let cacheData = await redisRead(this.id + '|markets');
+        if (cacheData) return cacheData;
+        else {
+
+            const response = await this.publicGetMarkets (params);
+            //
+            //     {
+            //         "data": [
+            //             {
+            //                 "volume_precision":4,
+            //                 "price_precision":2,
+            //                 "market":"btc_usdt",
+            //                 "min_amount":2,
+            //                 "min_volume":0.0001
+            //             },
+            //         ],
+            //         "date":1564507456,
+            //         "code":0
+            //     }
+            //
+            const markets = this.safeValue (response, 'data', []);
+            const result = [];
+            for (let i = 0; i < markets.length; i++) {
+                const market = markets[i];
+                const id = this.safeString (market, 'market');
+                const [ baseId, quoteId ] = id.split ('_');
+                const base = this.safeCurrencyCode (baseId);
+                const quote = this.safeCurrencyCode (quoteId);
+                const symbol = base + '/' + quote;
+                const precision = {
+                    'amount': this.safeInteger (market, 'volume_precision'),
+                    'price': this.safeInteger (market, 'price_precision'),
+                };
+                const limits = {
+                    'amount': {
+                        'min': this.safeFloat (market, 'min_volume'),
+                        'max': undefined,
+                    },
+                    'price': {
+                        'min': undefined,
+                        'max': undefined,
+                    },
+                    'cost': {
+                        'min': this.safeFloat (market, 'min_amount'),
+                        'max': undefined,
+                    },
+                };
+                const active = undefined;
+                result.push ({
+                    'id': id,
+                    'symbol': symbol,
+                    'base': base,
+                    'quote': quote,
+                    'baseId': baseId,
+                    'quoteId': quoteId,
+                    'active': active,
+                    'precision': precision,
+                    'limits': limits,
+                    'info': market,
+                });
+            }
+            // Storing markets in Redis
+            await redisWrite(this.id + '|markets', result, false, 60 * 60);
+            return result;
         }
-        return result;
     }
 
     async fetchBalance (params = {}) {
