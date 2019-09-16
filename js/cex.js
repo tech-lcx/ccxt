@@ -439,32 +439,71 @@ module.exports = class cex extends Exchange {
 
     async fetchOHLCV(symbol, timeframe = '1m', since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets();
-        const market = this.market(symbol);
-        if (since === undefined) {
-            since = this.milliseconds() - 86400000; // yesterday
-        } else {
-            if (this.options['fetchOHLCVWarning']) {
-                throw new ExchangeError(this.id + " fetchOHLCV warning: CEX can return historical candles for a certain date only, this might produce an empty or null reply. Set exchange.options['fetchOHLCVWarning'] = false or add ({ 'options': { 'fetchOHLCVWarning': false }}) to constructor params to suppress this warning message.");
-            }
-        }
-        let ymd = this.ymd(since);
+        let market = this.market(symbol);
+        let getTime = since;
+        let sinceTime = parseInt(getTime) - 8640000;
+        let ymd = this.ymd(sinceTime);
         ymd = ymd.split('-');
         ymd = ymd.join('');
-        const request = {
+        let request = {
             'pair': market['id'],
             'yyyymmdd': ymd,
         };
         try {
-            const response = await this.publicGetOhlcvHdYyyymmddPair(this.extend(request, params));
-            const key = 'data' + this.timeframes[timeframe];
-            const ohlcvs = JSON.parse(response[key]);
-            return this.parseOHLCVs(ohlcvs, market, timeframe, since, limit);
+            let result = [];
+            let response = await this.publicGetOhlcvHdYyyymmddPair(this.extend(request, params));
+            let ohlcvs = JSON.parse(response.data1m);
+            if (ohlcvs.length >= 0) {
+                for (let i = 0; i < ohlcvs.length; i++) {
+                    let ohlcv = this.parseOHLCV(ohlcvs[i], market, timeframe, since, limit)
+                    result.push(ohlcv);
+                }
+                return this.sortBy(result, 0)
+            }
         } catch (e) {
-            if (e instanceof NullResponse) {
+            if (e.message = "Cannot use 'in' operator to search for 'e' in null") {
+                var dateOffset = (24 * 60 * 60 * 1000) * 1;
+                since = parseInt(getTime) + dateOffset;
+                limit = 1000;
+                symbol = symbol;
+                console.log(since);
+                return this.fetchOHLCV(symbol, timeframe, since, limit, params = {});
+
+            }
+            else if (e instanceof NullResponse) {
                 return [];
             }
         }
     }
+
+    // async fetchOHLCV(symbol, timeframe = '1m', since = undefined, limit = undefined, params = {}) {
+    //     await this.loadMarkets();
+    //     const market = this.market(symbol);
+    //     if (since === undefined) {
+    //         since = this.milliseconds() - 86400000; // yesterday
+    //     } else {
+    //         if (this.options['fetchOHLCVWarning']) {
+    //             throw new ExchangeError(this.id + " fetchOHLCV warning: CEX can return historical candles for a certain date only, this might produce an empty or null reply. Set exchange.options['fetchOHLCVWarning'] = false or add ({ 'options': { 'fetchOHLCVWarning': false }}) to constructor params to suppress this warning message.");
+    //         }
+    //     }
+    //     let ymd = this.ymd(since);
+    //     ymd = ymd.split('-');
+    //     ymd = ymd.join('');
+    //     const request = {
+    //         'pair': market['id'],
+    //         'yyyymmdd': ymd,
+    //     };
+    //     try {
+    //         const response = await this.publicGetOhlcvHdYyyymmddPair(this.extend(request, params));
+    //         const key = 'data' + this.timeframes[timeframe];
+    //         const ohlcvs = JSON.parse(response[key]);
+    //         return this.parseOHLCVs(ohlcvs, market, timeframe, since, limit);
+    //     } catch (e) {
+    //         if (e instanceof NullResponse) {
+    //             return [];
+    //         }
+    //     }
+    // }
 
     parseTicker(ticker, market = undefined) {
         const timestamp = this.safeTimestamp(ticker, 'timestamp');

@@ -354,13 +354,13 @@ module.exports = class digifinex extends Exchange {
     }
 
     async fetchTickers (symbols = undefined, params = {}) {
-        const apiKey = this.safeValue (params, 'apiKey', this.apiKey);
-        if (!apiKey) {
-            throw new ArgumentsRequired (this.id + ' fetchTicker is a private v2 endpoint that requires an `exchange.apiKey` credential or an `apiKey` extra parameter');
-        }
+        // const apiKey = this.safeValue (params, 'apiKey', this.apiKey);
+        // if (!apiKey) {
+        //     throw new ArgumentsRequired (this.id + ' fetchTicker is a private v2 endpoint that requires an `exchange.apiKey` credential or an `apiKey` extra parameter');
+        // }
         await this.loadMarkets ();
         const request = {
-            'apiKey': apiKey,
+            // 'apiKey': apiKey,
         };
         const response = await this.v2GetTicker (this.extend (request, params));
         //
@@ -408,17 +408,17 @@ module.exports = class digifinex extends Exchange {
     }
 
     async fetchTicker (symbol, params = {}) {
-        const apiKey = this.safeValue (params, 'apiKey', this.apiKey);
-        if (!apiKey) {
-            throw new ArgumentsRequired (this.id + ' fetchTicker is a private v2 endpoint that requires an `exchange.apiKey` credential or an `apiKey` extra parameter');
-        }
+        // const apiKey = this.safeValue (params, 'apiKey', this.apiKey);
+        // if (!apiKey) {
+        //     throw new ArgumentsRequired (this.id + ' fetchTicker is a private v2 endpoint that requires an `exchange.apiKey` credential or an `apiKey` extra parameter');
+        // }
         await this.loadMarkets ();
         const market = this.market (symbol);
         // reversed base/quote in v2
         const marketId = market['quoteId'] + '_' + market['baseId'];
         const request = {
             'symbol': marketId,
-            'apiKey': apiKey,
+            // 'apiKey': apiKey,
         };
         const response = await this.v2GetTicker (this.extend (request, params));
         //
@@ -1109,7 +1109,7 @@ module.exports = class digifinex extends Exchange {
     }
 
     sign (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
-        const version = (api === 'v2') ? api : this.version;
+        const version = (api === 'v3') ? api : this.version;
         let url = this.urls['api'] + '/' + version + '/' + this.implodeParams (path, params);
         const query = this.omit (params, this.extractParams (path));
         const urlencoded = this.urlencode (this.keysort (query));
