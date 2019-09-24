@@ -390,8 +390,7 @@ module.exports = class digifinex extends Exchange {
             const ticker = this.extend ({
                 'date': date,
             }, tickers[reversedMarketId]);
-            const [ quoteId, baseId ] = reversedMarketId.split ('_');
-            const marketId = baseId + '_' + quoteId;
+            const marketId = ticker.symbol;
             let market = undefined;
             let symbol = undefined;
             if (marketId in this.markets_by_id) {
