@@ -5,6 +5,7 @@
 const Exchange = require ('./base/Exchange');
 const { InsufficientFunds, ArgumentsRequired, ExchangeError, InvalidOrder, InvalidAddress, AuthenticationError, NotSupported, OrderNotFound } = require ('./base/errors');
 const { redisRead, redisWrite } = require('../../../lib/utils');
+const PromiseThrottle = require('promise-throttle');
 
 // ----------------------------------------------------------------------------
 
@@ -30,6 +31,7 @@ module.exports = class gdax extends Exchange {
                 'fetchOrders': true,
                 'fetchTransactions': true,
                 'withdraw': true,
+                'fetchTickers':true
             },
             'timeframes': {
                 '1m': 60,
@@ -275,7 +277,30 @@ module.exports = class gdax extends Exchange {
         return this.parseOrderBook (orderbook);
     }
 
+    async fetchStats (symbol, params = {}) {
+        await this.loadMarkets ();
+        let market = this.market (symbol);
+        let request = this.extend ({
+            'id': market['id'],
+        }, params);
+        let ticker = await this.publicGetProductsIdStats (request);
+        let high = this.safeFloat (ticker, 'high');
+        let low = this.safeFloat (ticker, 'low');
+        let volume = this.safeFloat (ticker, 'volume');
+        let last = this.safeFloat (ticker, 'last');
+        return {
+            'high': high,
+            'low': low,
+            'close': last,
+            'last': last,
+            'baseVolume': this.safeFloat (ticker, 'volume'),
+            'quoteVolume': undefined,
+            'info': ticker,
+        };
+    }
+
     async fetchTicker (symbol, params = {}) {
+
         await this.loadMarkets ();
         let market = this.market (symbol);
         let request = this.extend ({
@@ -309,9 +334,49 @@ module.exports = class gdax extends Exchange {
             'percentage': undefined,
             'average': undefined,
             'baseVolume': this.safeFloat (ticker, 'volume'),
-            'quoteVolume': undefined,
+            'quoteVolume': this.safeFloat (ticker, 'volume'),
             'info': ticker,
         };
+    }
+
+    async fetchTickerV2 (symbol, params = {}) {
+
+        let V1Ticker = await this.fetchTicker(symbol);
+
+        let ticker = await this.fetchStats(symbol);      
+        const high = this.safeFloat (ticker, 'high');
+        const low = this.safeFloat (ticker, 'low');
+
+        V1Ticker.high = high;
+        V1Ticker.low = low;
+
+        return V1Ticker;
+    }
+
+    async fetchTickers (symbol = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets ();
+        const market = this.markets;
+
+        let pairs = Object.keys(market);
+        let promise = [];
+        let tickers = {};
+
+        let promiseThrottle = new PromiseThrottle({
+            requestsPerSecond: 1,           // up to 1 request per second
+            promiseImplementation: Promise  // the Promise library you are using
+          });
+
+        pairs.map(pair=>{
+            promise.push(promiseThrottle.add(this.fetchTickerV2.bind(this,pair)));
+        })
+
+        await Promise.all(promise).then(data=>{
+            data.map((ticker)=>{
+                tickers[ticker.symbol] = ticker;
+            })
+        });
+
+        return tickers;
     }
 
     parseTrade (trade, market = undefined) {
