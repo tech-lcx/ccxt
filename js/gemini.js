@@ -5,6 +5,7 @@
 const Exchange = require ('./base/Exchange');
 const { ExchangeError, ArgumentsRequired, BadRequest, OrderNotFound, InvalidOrder, InvalidNonce, DDoSProtection, InsufficientFunds, AuthenticationError, ExchangeNotAvailable, PermissionDenied, NotSupported } = require ('./base/errors');
 const { redisRead, redisWrite } = require('../../../lib/utils');
+const PromiseThrottle = require('promise-throttle');
 
 //  ---------------------------------------------------------------------------
 
@@ -21,7 +22,7 @@ module.exports = class gemini extends Exchange {
                 'createDepositAddress': true,
                 'CORS': false,
                 'fetchBidsAsks': false,
-                'fetchTickers': false,
+                'fetchTickers': true,
                 'fetchMyTrades': true,
                 'fetchOrder': true,
                 'fetchOrders': false,
@@ -347,6 +348,51 @@ module.exports = class gemini extends Exchange {
             'quoteVolume': this.safeFloat (ticker['volume'], quoteCurrency),
             'info': ticker,
         };
+    }
+
+    async fetchTickerV2 (symbol, params = {}) {
+
+        let V1Ticker = await this.fetchTicker(symbol);
+
+        await this.loadMarkets ();
+        const market = this.market (symbol);
+        const request = {
+            'symbol': market['id'],
+        };
+        const ticker = await this.publicGetV2TickerSymbol (this.extend (request, params));
+        const high = this.safeFloat (ticker, 'high');
+        const low = this.safeFloat (ticker, 'low');
+
+        V1Ticker.high = high;
+        V1Ticker.low = low;
+
+        return V1Ticker;
+    }
+
+    async fetchTickers (symbol = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets ();
+        const market = this.markets;
+
+        let pairs = Object.keys(market);
+        let promise = [];
+        let tickers = {};
+
+        let promiseThrottle = new PromiseThrottle({
+            requestsPerSecond: 1,           // up to 1 request per second
+            promiseImplementation: Promise  // the Promise library you are using
+          });
+
+        pairs.map(pair=>{
+            promise.push(promiseThrottle.add(this.fetchTickerV2.bind(this,pair)));
+        })
+
+        await Promise.all(promise).then(data=>{
+            data.map((ticker)=>{
+                tickers[ticker.symbol] = ticker;
+            })
+        });
+
+        return tickers;
     }
 
     parseTrade (trade, market = undefined) {
