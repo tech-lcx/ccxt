@@ -437,7 +437,7 @@ module.exports = class cex extends Exchange {
         ];
     }
 
-    async fetchOHLCV(symbol, timeframe = '1m', since = undefined, limit = undefined, params = {}) {
+   async fetchOHLCV(symbol, timeframe = '1m', since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets();
         let market = this.market(symbol);
         let getTime = since;
@@ -453,28 +453,37 @@ module.exports = class cex extends Exchange {
             let result = [];
             let response = await this.publicGetOhlcvHdYyyymmddPair(this.extend(request, params));
             let ohlcvs = JSON.parse(response.data1m);
-            if (ohlcvs.length >= 0) {
+            if (ohlcvs.length > 0) {
                 for (let i = 0; i < ohlcvs.length; i++) {
                     let ohlcv = this.parseOHLCV(ohlcvs[i], market, timeframe, since, limit)
                     result.push(ohlcv);
                 }
                 return this.sortBy(result, 0)
-            }
-        } catch (e) {
-            if (e.message = "Cannot use 'in' operator to search for 'e' in null") {
-                var dateOffset = (24 * 60 * 60 * 1000) * 1;
+            }else{
+                let dateOffset = (24 * 60 * 60 * 1000) * 1; // 1 days
+                let presentTime = new Date().getTime(); 
                 since = parseInt(getTime) + dateOffset;
                 limit = 1000;
                 symbol = symbol;
-                console.log(since);
+                if (since <= presentTime)
                 return this.fetchOHLCV(symbol, timeframe, since, limit, params = {});
-
+            }
+        } catch (e) {
+            if (e.message = "Cannot use 'in' operator to search for 'e' in null") {
+                let dateOffset = (24 * 60 * 60 * 1000) * 5;  // 5 days
+                let presentTime = new Date().getTime(); 
+                since = parseInt(getTime) + dateOffset;
+                limit = 1000;
+                symbol = symbol;
+                if (since <= presentTime)
+                return this.fetchOHLCV(symbol, timeframe, since, limit, params = {});
             }
             else if (e instanceof NullResponse) {
                 return [];
             }
         }
     }
+
 
     // async fetchOHLCV(symbol, timeframe = '1m', since = undefined, limit = undefined, params = {}) {
     //     await this.loadMarkets();
