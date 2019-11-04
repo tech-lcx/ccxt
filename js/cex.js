@@ -441,7 +441,7 @@ module.exports = class cex extends Exchange {
         await this.loadMarkets();
         let market = this.market(symbol);
         let getTime = since;
-        let sinceTime = parseInt(getTime);
+        let sinceTime = parseInt(getTime) + 21600000;  // 21600000 7 hr in sec.
         let ymd = this.ymd(sinceTime);
         ymd = ymd.split('-');
         ymd = ymd.join('');
@@ -451,7 +451,7 @@ module.exports = class cex extends Exchange {
         };
         try {
             let result = [];
-            let response = await this.publicGetOhlcvHdYyyymmddPair(this.extend(request, params));
+            let response = await this.publicGetOhlcvHdYyyymmddPair(this.extend(request, {}));
             let ohlcvs = JSON.parse(response.data1m);
             if (ohlcvs.length > 0) {
                 for (let i = 0; i < ohlcvs.length; i++) {
