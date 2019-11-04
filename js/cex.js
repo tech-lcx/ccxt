@@ -441,7 +441,7 @@ module.exports = class cex extends Exchange {
         await this.loadMarkets();
         let market = this.market(symbol);
         let getTime = since;
-        let sinceTime = parseInt(getTime) - 8640000;
+        let sinceTime = parseInt(getTime);
         let ymd = this.ymd(sinceTime);
         ymd = ymd.split('-');
         ymd = ymd.join('');
@@ -459,19 +459,31 @@ module.exports = class cex extends Exchange {
                     result.push(ohlcv);
                 }
                 return this.sortBy(result, 0)
-            }else{
-                let dateOffset = (24 * 60 * 60 * 1000) * 1; // 1 days
+            } else {
                 let presentTime = new Date().getTime(); 
+                let dateOffset = 0;
+                // 31536000000 is 1 year in mili sec.
+                if( presentTime - since < 31536000000 ) 
+                    dateOffset = ( 30 * 60 * 1000 ) * 1; // 30 min. in mili sec.
+                else 
+                    dateOffset = (24 * 60 * 60 * 1000) * 1; // 1 days 
+                
                 since = parseInt(getTime) + dateOffset;
                 limit = 1000;
                 symbol = symbol;
                 if (since <= presentTime)
-                return this.fetchOHLCV(symbol, timeframe, since, limit, params = {});
+                   return this.fetchOHLCV(symbol, timeframe, since, limit, params = {});
             }
         } catch (e) {
             if (e.message = "Cannot use 'in' operator to search for 'e' in null") {
-                let dateOffset = (24 * 60 * 60 * 1000) * 5;  // 5 days
                 let presentTime = new Date().getTime(); 
+                let dateOffset = 0;
+                // 47304000000 is 1.5 year in mili sec.
+                if( presentTime - since < 47304000000 ) 
+                    dateOffset = (24 * 60 * 60 * 1000) * 1;  // 1 days
+                else
+                    dateOffset = (24 * 60 * 60 * 1000) * 5;  // 5 days
+
                 since = parseInt(getTime) + dateOffset;
                 limit = 1000;
                 symbol = symbol;
