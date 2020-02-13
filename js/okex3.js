@@ -1059,7 +1059,7 @@ module.exports = class okex3 extends Exchange {
         let market = this.market (symbol);
         const method = market['type'] + 'GetInstrumentsInstrumentIdCandles';
         const request = {
-            'instrument_id': market['id'],
+            'instrument_id': market.symbol.replace('/', '-'),
             'granularity': this.timeframes[timeframe],
         };
         if (since !== undefined) {
