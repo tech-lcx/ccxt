@@ -716,7 +716,7 @@ module.exports = class okex3 extends Exchange {
         let method = market['type'] + 'GetInstrumentsInstrumentId';
         method += (market['type'] === 'swap') ? 'Depth' : 'Book';
         let request = {
-            'instrument_id': market['id'],
+            'instrument_id': market.symbol.replace('/', '-'),
         };
         if (limit !== undefined) {
             request['size'] = limit; // max 200
@@ -808,7 +808,7 @@ module.exports = class okex3 extends Exchange {
         const market = this.market (symbol);
         const method = market['type'] + 'GetInstrumentsInstrumentIdTicker';
         const request = {
-            'instrument_id': market['id'],
+            'instrument_id': market.symbol.replace('/', '-'),
         };
         const response = await this[method] (this.extend (request, params));
         //
@@ -964,7 +964,7 @@ module.exports = class okex3 extends Exchange {
             limit = 100; // maximum = default = 100
         }
         const request = {
-            'instrument_id': market['id'],
+            'instrument_id': market.symbol.replace('/', '-'),
             'limit': limit,
             // from: 'id',
             // to: 'id',
@@ -1505,7 +1505,7 @@ module.exports = class okex3 extends Exchange {
         await this.loadMarkets ();
         const market = this.market (symbol);
         let request = {
-            'instrument_id': market['id'],
+            'instrument_id': market.symbol.replace('/', '-'),
             // 'client_oid': 'abcdef1234567890', // [a-z0-9]{1,32}
             // 'order_type': '0', // 0: Normal limit order (Unfilled and 0 represent normal limit order) 1: Post only 2: Fill Or Kill 3: Immediatel Or Cancel
         };
@@ -1597,7 +1597,7 @@ module.exports = class okex3 extends Exchange {
         }
         let method = type + 'PostCancelOrder';
         const request = {
-            'instrument_id': market['id'],
+            'instrument_id': market.symbol.replace('/', '-'),
         };
         if (market['futures'] || market['swap']) {
             method += 'InstrumentId';
@@ -1614,7 +1614,7 @@ module.exports = class okex3 extends Exchange {
         }
         const query = this.omit (params, 'type');
         const response = await this[method] (this.extend (request, query));
-        const result = ('result' in response) ? response : this.safeValue (response, market['id'], {});
+        const result = ('result' in response) ? response : this.safeValue (response, market.symbol.replace('/', '-'), {});
         //
         // spot, margin
         //
@@ -1826,7 +1826,7 @@ module.exports = class okex3 extends Exchange {
         const instrumentId = (market['futures'] || market['swap']) ? 'InstrumentId' : '';
         let method = type + 'GetOrders' + instrumentId;
         const request = {
-            'instrument_id': market['id'],
+            'instrument_id': market.symbol.replace('/', '-'),
             // 'client_oid': 'abcdef12345', // optional, [a-z0-9]{1,32}
             // 'order_id': id,
         };
@@ -1908,7 +1908,7 @@ module.exports = class okex3 extends Exchange {
         //  '6': incomplete（open+partially filled),
         //  '7': complete（cancelled+fully filled),
         const request = {
-            'instrument_id': market['id'],
+            'instrument_id': market.symbol.replace('/', '-'),
             'state': state,
         };
         let method = type + 'GetOrders';
@@ -2289,7 +2289,7 @@ module.exports = class okex3 extends Exchange {
             limit = 100;
         }
         const request = {
-            'instrument_id': market['id'],
+            'instrument_id': market.symbol.replace('/', '-'),
             'order_id': id,
             // from: '1', // return the page after the specified page number
             // to: '1', // return the page before the specified page number
@@ -2385,7 +2385,7 @@ module.exports = class okex3 extends Exchange {
             argument = 'InstrumentId';
             const market = this.market (code); // we intentionally put a market inside here for the margin and swap ledgers
             currency = this.currency (market['base']);
-            request['instrument_id'] = market['id'];
+            request['instrument_id'] = market.symbol.replace('/', '-');
             //
             //     if (type === 'margin') {
             //         //
