@@ -865,8 +865,10 @@ module.exports = class gdax extends Exchange {
 
     async request (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
         let response = await this.fetch2 (path, api, method, params, headers, body);
-        if ('message' in response) {
+        if(typeof(response) === "object"){
+            if ('message' in response) {
             throw new ExchangeError (this.id + ' ' + this.json (response));
+            }
         }
         return response;
     }
