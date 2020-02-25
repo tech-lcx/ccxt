@@ -42,7 +42,7 @@ module.exports = class cex extends Exchange {
             'requiredCredentials': {
                 'apiKey': true,
                 'secret': true,
-                'uid': true,
+                'uid': false,
             },
             'api': {
                 'public': {
@@ -1000,7 +1000,7 @@ module.exports = class cex extends Exchange {
         } else {
             this.checkRequiredCredentials();
             const nonce = this.nonce().toString();
-            const auth = nonce + this.uid + this.apiKey;
+            const auth = nonce + this.password + this.apiKey;
             const signature = this.hmac(this.encode(auth), this.encode(this.secret));
             body = this.json(this.extend({
                 'key': this.apiKey,
