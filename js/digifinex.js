@@ -977,7 +977,7 @@ module.exports = class digifinex extends Exchange {
         //         ]
         //     }
         //
-        return this.parseOrder (response);
+        return this.parseOrder (response.data[0]);
     }
 
     async fetchMyTrades (symbol = undefined, since = undefined, limit = undefined, params = {}) {
