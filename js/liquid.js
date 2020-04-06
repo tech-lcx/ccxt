@@ -291,6 +291,19 @@ module.exports = class liquid extends Exchange {
     await this.loadMarkets();
     let balances = await this.privateGetAccountsBalance(params);
     let result = { 'info': balances };
+
+    let promise = [];
+    for(let i=0;i<balances.length;i++)
+      if(balances[i].balance > 0)
+        promise.push(this.privateGetAccountsId(this.extend({
+          'id': balances[i].currency,
+        }, params)))
+
+    let res = await Promise.all(promise);
+    let allCurrencyBalances = {};
+    for(let i=0;i<res.length;i++)
+      allCurrencyBalances[res[i].currency] = res[i];
+
     for (let b = 0; b < balances.length; b++) {
       let balance = balances[b];
       let currencyId = balance['currency'];
@@ -300,9 +313,9 @@ module.exports = class liquid extends Exchange {
       }
       let total = parseFloat(balance['balance']);
       let account = {
-        'free': total,
-        'used': undefined,
-        'total': total,
+        'free': allCurrencyBalances[currencyId] ? Number(allCurrencyBalances[currencyId].free_balance) : total,
+        'used': allCurrencyBalances[currencyId] ? Number(allCurrencyBalances[currencyId].reserved_balance) : undefined,
+        'total': allCurrencyBalances[currencyId] ? Number(allCurrencyBalances[currencyId].balance) : total,
       };
       result[code] = account;
     }
@@ -482,7 +495,7 @@ module.exports = class liquid extends Exchange {
       'quantity': this.amountToPrecision(symbol, amount),
     };
     if (type === 'limit') {
-      order['price'] = this.priceToPrecision(symbol, price);
+      order['price'] = this.amountToPrecision(symbol, price);
     }
     let response = await this.privatePostOrders(this.extend(order, params));
     return this.parseOrder(response);
