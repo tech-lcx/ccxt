@@ -161,8 +161,8 @@ module.exports = class gemini extends Exchange {
         let cacheData = await redisRead(this.id + '|markets');
         if (cacheData) return cacheData;
         else {
-            const method = this.safeValue (this.options, 'fetchMarketsMethod', 'fetch_markets_from_api');
-            let result = await this[method] (params);
+            const method = 'fetch_markets_from_aPI'
+            let result = await this.fetchMarketsFromAPI(params);
              // Storing markets in Redis
              await redisWrite(this.id + '|markets', result, false, 60 * 60);
              return result;
