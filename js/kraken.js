@@ -259,13 +259,17 @@ module.exports = class kraken extends Exchange {
         return result;
     }
 
-    async fetchMarkets (params = {}) {
+    async fetchMarkets(params = {}) {
         let cacheData = await redisRead(this.id + '|markets');
         if (cacheData) return cacheData;
         else {
-            let markets = await this.publicGetAssetPairs ();
-            let limits = await this.fetchMinOrderAmounts ();
-            let keys = Object.keys (markets['result']);
+            let markets = await this.publicGetAssetPairs();
+            const fetchMinOrderAmounts = this.safeValue(this.options, 'fetchMinOrderAmounts', false);
+            let limits = {};
+            if (fetchMinOrderAmounts) {
+                limits = await this.fetchMinOrderAmounts();
+            }
+            let keys = Object.keys(markets['result']);
             let result = [];
             for (let i = 0; i < keys.length; i++) {
                 let id = keys[i];
@@ -276,30 +280,30 @@ module.exports = class kraken extends Exchange {
                 let quote = quoteId;
                 if (base.length > 3) {
                     if ((base[0] === 'X') || (base[0] === 'Z')) {
-                        base = base.slice (1);
+                        base = base.slice(1);
                     }
                 }
                 if (quote.length > 3) {
                     if ((quote[0] === 'X') || (quote[0] === 'Z')) {
-                        quote = quote.slice (1);
+                        quote = quote.slice(1);
                     }
                 }
-                base = this.commonCurrencyCode (base);
-                quote = this.commonCurrencyCode (quote);
-                let darkpool = id.indexOf ('.d') >= 0;
+                base = this.commonCurrencyCode(base);
+                quote = this.commonCurrencyCode(quote);
+                let darkpool = id.indexOf('.d') >= 0;
                 let symbol = darkpool ? market['altname'] : (base + '/' + quote);
                 let maker = undefined;
                 if ('fees_maker' in market) {
-                    maker = parseFloat (market['fees_maker'][0][1]) / 100;
+                    maker = parseFloat(market['fees_maker'][0][1]) / 100;
                 }
                 let precision = {
                     'amount': market['lot_decimals'],
                     'price': market['pair_decimals'],
                 };
-                let minAmount = Math.pow (10, -precision['amount']);
+                let minAmount = Math.pow(10, -precision['amount']);
                 if (base in limits)
                     minAmount = limits[base];
-                result.push ({
+                result.push({
                     'id': id,
                     'symbol': symbol,
                     'base': base,
@@ -310,16 +314,16 @@ module.exports = class kraken extends Exchange {
                     'info': market,
                     'altname': market['altname'],
                     'maker': maker,
-                    'taker': parseFloat (market['fees'][0][1]) / 100,
+                    'taker': parseFloat(market['fees'][0][1]) / 100,
                     'active': true,
                     'precision': precision,
                     'limits': {
                         'amount': {
                             'min': minAmount,
-                            'max': Math.pow (10, precision['amount']),
+                            'max': Math.pow(10, precision['amount']),
                         },
                         'price': {
-                            'min': Math.pow (10, -precision['price']),
+                            'min': Math.pow(10, -precision['price']),
                             'max': undefined,
                         },
                         'cost': {
@@ -329,8 +333,8 @@ module.exports = class kraken extends Exchange {
                     },
                 });
             }
-            result = this.appendInactiveMarkets (result);
-            this.marketsByAltname = this.indexBy (result, 'altname');
+            result = this.appendInactiveMarkets(result);
+            this.marketsByAltname = this.indexBy(result, 'altname');
             // Storing markets in Redis
             await redisWrite(this.id + '|markets', result, false, 60 * 60);
             return result;
