@@ -984,6 +984,7 @@ module.exports = class binance extends Exchange {
         }
         if (since !== undefined) {
             request['startTime'] = since;
+            request['endTime'] = this.sum (since, 7776000000);
         }
         let response = await this.wapiGetDepositHistory(this.extend(request, params));
         //
@@ -1009,6 +1010,7 @@ module.exports = class binance extends Exchange {
         }
         if (since !== undefined) {
             request['startTime'] = since;
+            request['endTime'] = this.sum (since, 7776000000);
         }
         let response = await this.wapiGetWithdrawHistory(this.extend(request, params));
         //
