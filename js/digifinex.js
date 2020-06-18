@@ -44,7 +44,7 @@ module.exports = class digifinex extends Exchange {
                 'doc': [
                     'https://docs.digifinex.vip',
                 ],
-                'fees': 'https://digifinex.zendesk.com/hc/en-us/articles/360000328482-Fee-Structure-on-DigiFinex',
+                'fees': 'https://digifinex.zendesk.com/hc/en-us/articles/360000328422-Fee-Structure-on-DigiFinex',
                 'referral': 'https://www.digifinex.vip/en-ww/from/DhOzBg/3798****5114',
             },
             'api': {
@@ -101,6 +101,14 @@ module.exports = class digifinex extends Exchange {
                     ],
                 },
             },
+            'fees': {
+                'trading': {
+                    'tierBased': false,
+                    'percentage': true,
+                    'maker': 0.002,
+                    'taker': 0.002,
+                },
+            },
             'exceptions': {
                 'exact': {
                     '10001': [ BadRequest, "Wrong request method, please check it's a GET ot POST request" ],
@@ -136,6 +144,9 @@ module.exports = class digifinex extends Exchange {
             'options': {
                 'defaultType': 'spot',
                 'types': [ 'spot', 'margin', 'otc' ],
+            },
+            'commonCurrencies': {
+                'BHT': 'Black House Test',
             },
         });
     }
@@ -390,7 +401,8 @@ module.exports = class digifinex extends Exchange {
             const ticker = this.extend ({
                 'date': date,
             }, tickers[reversedMarketId]);
-            const marketId = ticker.symbol;
+            const [ quoteId, baseId ] = reversedMarketId.split ('_');
+            const marketId = baseId + '_' + quoteId;
             let market = undefined;
             let symbol = undefined;
             if (marketId in this.markets_by_id) {
@@ -486,8 +498,8 @@ module.exports = class digifinex extends Exchange {
             'change': undefined,
             'percentage': percentage,
             'average': undefined,
-            'baseVolume': this.safeFloat (ticker, 'base_vol'),
-            'quoteVolume': this.safeFloat (ticker, 'vol'),
+            'baseVolume': this.safeFloat (ticker, 'vol'),
+            'quoteVolume': this.safeFloat (ticker, 'base_vol'),
             'info': ticker,
         };
     }
@@ -521,7 +533,7 @@ module.exports = class digifinex extends Exchange {
         //
         const id = this.safeString (trade, 'id');
         const orderId = this.safeString (trade, 'order_id');
-        const timestamp = this.safeTimestamp (trade, 'date', 'timestamp');
+        const timestamp = this.safeTimestamp2 (trade, 'date', 'timestamp');
         const side = this.safeString2 (trade, 'type', 'side');
         const price = this.safeFloat (trade, 'price');
         const amount = this.safeFloat (trade, 'amount');
@@ -613,14 +625,24 @@ module.exports = class digifinex extends Exchange {
         return this.parseTrades (data, market, since, limit);
     }
 
-    parseOHLCV (ohlcv, market = undefined, timeframe = '1m', since = undefined, limit = undefined) {
+    parseOHLCV (ohlcv, market = undefined) {
+        //
+        //     [
+        //         1556712900,
+        //         2205.899,
+        //         0.029967,
+        //         0.02997,
+        //         0.029871,
+        //         0.029927
+        //     ]
+        //
         return [
-            ohlcv[0] * 1000, // timestamp
-            ohlcv[5], // open
-            ohlcv[3], // high
-            ohlcv[4], // low
-            ohlcv[2], // close
-            ohlcv[1], // volume
+            this.safeTimestamp (ohlcv, 0),
+            this.safeFloat (ohlcv, 5), // open
+            this.safeFloat (ohlcv, 3), // high
+            this.safeFloat (ohlcv, 4), // low
+            this.safeFloat (ohlcv, 2), // close
+            this.safeFloat (ohlcv, 1), // volume
         ];
     }
 
@@ -845,6 +867,7 @@ module.exports = class digifinex extends Exchange {
         return {
             'info': order,
             'id': id,
+            'clientOrderId': undefined,
             'timestamp': timestamp,
             'datetime': this.iso8601 (timestamp),
             'lastTradeTimestamp': lastTradeTimestamp,
@@ -859,6 +882,7 @@ module.exports = class digifinex extends Exchange {
             'average': average,
             'status': status,
             'fee': undefined,
+            'trades': undefined,
         };
     }
 
@@ -951,6 +975,10 @@ module.exports = class digifinex extends Exchange {
         const orderType = this.safeString (params, 'type', defaultType);
         params = this.omit (params, 'type');
         await this.loadMarkets ();
+        let market = undefined;
+        if (symbol !== undefined) {
+            market = this.market (symbol);
+        }
         const request = {
             'market': orderType,
             'order_id': id,
@@ -977,7 +1005,8 @@ module.exports = class digifinex extends Exchange {
         //         ]
         //     }
         //
-        return this.parseOrder (response.data[0]);
+        const data = this.safeValue (response, 'data', {});
+        return this.parseOrder (data, market);
     }
 
     async fetchMyTrades (symbol = undefined, since = undefined, limit = undefined, params = {}) {

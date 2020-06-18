@@ -2,19 +2,19 @@
 
 //  ---------------------------------------------------------------------------
 
-const Exchange = require ('./base/Exchange');
-const { ExchangeError, ArgumentsRequired, BadRequest, OrderNotFound, InvalidOrder, InvalidNonce, DDoSProtection, InsufficientFunds, AuthenticationError, ExchangeNotAvailable, PermissionDenied, NotSupported } = require ('./base/errors');
+const Exchange = require('./base/Exchange');
+const { ExchangeError, ArgumentsRequired, BadRequest, OrderNotFound, InvalidOrder, InvalidNonce, InsufficientFunds, AuthenticationError, PermissionDenied, NotSupported, OnMaintenance, RateLimitExceeded } = require('./base/errors');
 const { redisRead, redisWrite } = require('../../../lib/utils');
 const PromiseThrottle = require('promise-throttle');
 
 //  ---------------------------------------------------------------------------
 
 module.exports = class gemini extends Exchange {
-    describe () {
-        return this.deepExtend (super.describe (), {
+    describe() {
+        return this.deepExtend(super.describe(), {
             'id': 'gemini',
             'name': 'Gemini',
-            'countries': [ 'US' ],
+            'countries': ['US'],
             'rateLimit': 1500, // 200 for private API
             'version': 'v1',
             'has': {
@@ -47,7 +47,11 @@ module.exports = class gemini extends Exchange {
                     'https://docs.gemini.com/rest-api',
                     'https://docs.sandbox.gemini.com',
                 ],
-                'test': 'https://api.sandbox.gemini.com',
+                'test': {
+                    'public': 'https://api.sandbox.gemini.com',
+                    'private': 'https://api.sandbox.gemini.com',
+                    'web': 'https://docs.sandbox.gemini.com',
+                },
                 'fees': [
                     'https://gemini.com/api-fee-schedule',
                     'https://gemini.com/trading-fees',
@@ -81,6 +85,7 @@ module.exports = class gemini extends Exchange {
                         'v1/order/status',
                         'v1/orders',
                         'v1/mytrades',
+                        'v1/notionalvolume',
                         'v1/tradevolume',
                         'v1/transfers',
                         'v1/balances',
@@ -102,10 +107,10 @@ module.exports = class gemini extends Exchange {
                 '403': PermissionDenied, // The API key is missing the role necessary to access this private API endpoint
                 '404': OrderNotFound, // Unknown API entry point or Order not found
                 '406': InsufficientFunds, // Insufficient Funds
-                '429': DDoSProtection, // Rate Limiting was applied
+                '429': RateLimitExceeded, // Rate Limiting was applied
                 '500': ExchangeError, // The server encountered an error
                 '502': ExchangeError, // Technical issues are preventing the request from being satisfied
-                '503': ExchangeNotAvailable, // The exchange is down for maintenance
+                '503': OnMaintenance, // The exchange is down for maintenance
             },
             'timeframes': {
                 '1m': '1m',
@@ -135,7 +140,7 @@ module.exports = class gemini extends Exchange {
                     'InvalidSignature': AuthenticationError, // The signature did not match the expected signature
                     'InvalidSymbol': BadRequest, // An invalid symbol was specified
                     'InvalidTimestampInPayload': BadRequest, // The JSON payload contained a timestamp parameter with an unsupported value.
-                    'Maintenance': ExchangeNotAvailable, // The system is down for maintenance
+                    'Maintenance': OnMaintenance, // The system is down for maintenance
                     'MarketNotOpen': InvalidOrder, // The order was rejected because the market is not accepting new orders
                     'MissingApikeyHeader': AuthenticationError, // The X-GEMINI-APIKEY header was missing
                     'MissingOrderField': InvalidOrder, // A required order_id field was not specified
@@ -145,11 +150,13 @@ module.exports = class gemini extends Exchange {
                     'NoSSL': AuthenticationError, // You must use HTTPS to access the API
                     'OptionsMustBeArray': BadRequest, // The options parameter must be an array.
                     'OrderNotFound': OrderNotFound, // The order specified was not found
-                    'RateLimit': DDoSProtection, // Requests were made too frequently. See Rate Limits below.
+                    'RateLimit': RateLimitExceeded, // Requests were made too frequently. See Rate Limits below.
                     'System': ExchangeError, // We are experiencing technical issues
                     'UnsupportedOption': BadRequest, // This order execution option is not supported.
                 },
-                'broad': {},
+                'broad': {
+                    'The Gemini Exchange is currently undergoing maintenance.': OnMaintenance, // The Gemini Exchange is currently undergoing maintenance. Please check https://status.gemini.com/ for more information.
+                },
             },
             'options': {
                 'fetchMarketsMethod': 'fetch_markets_from_web',
@@ -157,124 +164,143 @@ module.exports = class gemini extends Exchange {
         });
     }
 
-    async fetchMarkets (params = {}) {
+    async fetchMarkets(params = {}) {
         let cacheData = await redisRead(this.id + '|markets');
         if (cacheData) return cacheData;
         else {
-            const method = 'fetch_markets_from_aPI'
-            let result = await this.fetchMarketsFromAPI(params);
-             // Storing markets in Redis
-             await redisWrite(this.id + '|markets', result, false, 60 * 60);
-             return result;
+            const method = this.safeValue(this.options, 'fetchMarketsMethod', 'fetch_markets_from_api');
+            let result = await this['fetch_markets_from_api'](params);
+            // Storing markets in Redis
+            await redisWrite(this.id + '|markets', result, false, 60 * 60);
+            return result;
         }
-        
+
     }
 
-    async fetchMarketsFromWeb (symbols = undefined, params = {}) {
-        const response = await this.webGetRestApi (params);
-        const sections = response.split ('<h1 id="symbols-and-minimums">Symbols and minimums</h1>');
+    async fetchMarketsFromWeb(symbols = undefined, params = {}) {
+        const response = await this.webGetRestApi(params);
+        const sections = response.split('<h1 id="symbols-and-minimums">Symbols and minimums</h1>');
         const numSections = sections.length;
         const error = this.id + ' the ' + this.name + ' API doc HTML markup has changed, breaking the parser of order limits and precision info for ' + this.name + ' markets.';
         if (numSections !== 2) {
-            throw new NotSupported (error);
+            throw new NotSupported(error);
         }
-        const tables = sections[1].split ('tbody>');
+        const tables = sections[1].split('tbody>');
         const numTables = tables.length;
         if (numTables < 2) {
-            throw new NotSupported (error);
+            throw new NotSupported(error);
         }
-        // tables[1] = tables[1].replace ("\n", ''); // eslint-disable-line quotes
-        const rows = tables[1].split ("<tr>\n"); // eslint-disable-line quotes
+        const rows = tables[1].split("\n<tr>\n"); // eslint-disable-line quotes
         const numRows = rows.length;
         if (numRows < 2) {
-            throw new NotSupported (error);
+            throw new NotSupported(error);
         }
+        const apiSymbols = await this.fetchMarketsFromAPI(params);
+        const indexedSymbols = this.indexBy(apiSymbols, 'symbol');
         const result = [];
         // skip the first element (empty string)
         for (let i = 1; i < numRows; i++) {
             const row = rows[i];
-            const cells = row.split ("</td>\n"); // eslint-disable-line quotes
+            const cells = row.split("</td>\n"); // eslint-disable-line quotes
             const numCells = cells.length;
-            if (numCells < 7) {
-                throw new NotSupported (error);
+            if (numCells < 9) {
+                throw new NotSupported(error);
             }
-            //
             //     [
-            //         '<td><code class="prettyprint">btcusd</code>',
-            //         '<td>USD', // quote
-            //         '<td>BTC', // base
-            //         '<td>0.00001 BTC (1e-5)', // min amount
-            //         '<td>0.00000001 BTC (1e-8)', // amount min tick size
-            //         '<td>0.01 USD', // price min tick size
-            //         '</tr>\n'
+            //         '<td>BTC', // currency
+            //         '<td>0.00001 BTC (1e-5)', // min order size
+            //         '<td>0.00000001 BTC (1e-8)', // tick size
+            //         '<td>0.01 USD', // usd price increment
+            //         '<td>N/A', // btc price increment
+            //         '<td>0.0001 ETH (1e-4)', // eth price increment
+            //         '<td>0.0001 BCH (1e-4)', // bch price increment
+            //         '<td>0.001 LTC (1e-3)', // ltc price increment
+            //         '</tr>'
             //     ]
             //
-            let id = cells[0].replace ('<td>', '');
-            id = id.replace ('<code class="prettyprint">', '');
-            id = id.replace ('</code>', '');
-            let baseId = cells[2].replace ('<td>', '');
-            let quoteId = cells[1].replace ('<td>', '');
-            const minAmountAsString = cells[3].replace ('<td>', '');
-            const amountTickSizeAsString = cells[4].replace ('<td>', '');
-            const priceTickSizeAsString = cells[5].replace ('<td>', '');
-            const minAmount = minAmountAsString.split (' ');
-            const amountPrecision = amountTickSizeAsString.split (' ');
-            const pricePrecision = priceTickSizeAsString.split (' ');
-            baseId = baseId.toLowerCase ();
-            quoteId = quoteId.toLowerCase ();
-            const base = this.safeCurrencyCode (baseId);
-            const quote = this.safeCurrencyCode (quoteId);
-            const symbol = base + '/' + quote;
-            const precision = {
-                'amount': this.precisionFromString (amountPrecision[0]),
-                'price': this.precisionFromString (pricePrecision[0]),
-            };
-            const active = undefined;
-            result.push ({
-                'id': id,
-                'info': row,
-                'symbol': symbol,
-                'base': base,
-                'quote': quote,
-                'baseId': baseId,
-                'quoteId': quoteId,
-                'active': active,
-                'precision': precision,
-                'limits': {
-                    'amount': {
-                        'min': parseFloat (minAmount[0]),
-                        'max': undefined,
+            const uppercaseBaseId = cells[0].replace('<td>', '');
+            const baseId = uppercaseBaseId.toLowerCase();
+            const base = this.safeCurrencyCode(baseId);
+            const quoteIds = ['usd', 'btc', 'eth', 'bch', 'ltc'];
+            const minAmountString = cells[1].replace('<td>', '');
+            const minAmountParts = minAmountString.split(' ');
+            const minAmount = this.safeFloat(minAmountParts, 0);
+            const amountPrecisionString = cells[2].replace('<td>', '');
+            const amountPrecisionParts = amountPrecisionString.split(' ');
+            const amountPrecision = this.precisionFromString(amountPrecisionParts[0]);
+            for (let j = 0; j < quoteIds.length; j++) {
+                const quoteId = quoteIds[j];
+                const quote = this.safeCurrencyCode(quoteId);
+                const pricePrecisionIndex = this.sum(3, j);
+                const pricePrecisionString = cells[pricePrecisionIndex].replace('<td>', '');
+                if (pricePrecisionString === 'N/A') {
+                    continue;
+                }
+                const pricePrecisionParts = pricePrecisionString.split(' ');
+                const pricePrecision = this.precisionFromString(pricePrecisionParts[0]);
+                const symbol = base + '/' + quote;
+                if (!(symbol in indexedSymbols)) {
+                    continue;
+                }
+                const id = baseId + quoteId;
+                const active = undefined;
+                result.push({
+                    'id': id,
+                    'info': row,
+                    'symbol': symbol,
+                    'base': base,
+                    'quote': quote,
+                    'baseId': baseId,
+                    'quoteId': quoteId,
+                    'active': active,
+                    'precision': {
+                        'amount': amountPrecision,
+                        'price': pricePrecision,
                     },
-                    'price': {
-                        'min': undefined,
-                        'max': undefined,
+                    'limits': {
+                        'amount': {
+                            'min': minAmount,
+                            'max': undefined,
+                        },
+                        'price': {
+                            'min': undefined,
+                            'max': undefined,
+                        },
+                        'cost': {
+                            'min': undefined,
+                            'max': undefined,
+                        },
                     },
-                    'cost': {
-                        'min': undefined,
-                        'max': undefined,
-                    },
-                },
-            });
+                });
+            }
         }
         return result;
     }
 
-    async fetchMarketsFromAPI (params = {}) {
-        const response = await this.publicGetV1Symbols (params);
+    async fetchMarketsFromAPI(params = {}) {
+        const response = await this.publicGetV1Symbols(params);
         const result = [];
         for (let i = 0; i < response.length; i++) {
             const id = response[i];
             const market = id;
-            const baseId = id.slice (0, 3);
-            const quoteId = id.slice (3, 6);
-            const base = this.safeCurrencyCode (baseId);
-            const quote = this.safeCurrencyCode (quoteId);
+            const idLength = id.length - 0;
+            let baseId = undefined;
+            let quoteId = undefined;
+            if (idLength === 7) {
+                baseId = id.slice(0, 4);
+                quoteId = id.slice(4, 7);
+            } else {
+                baseId = id.slice(0, 3);
+                quoteId = id.slice(3, 6);
+            }
+            const base = this.safeCurrencyCode(baseId);
+            const quote = this.safeCurrencyCode(quoteId);
             const symbol = base + '/' + quote;
             const precision = {
                 'amount': undefined,
                 'price': undefined,
             };
-            result.push ({
+            result.push({
                 'id': id,
                 'info': market,
                 'symbol': symbol,
@@ -302,39 +328,39 @@ module.exports = class gemini extends Exchange {
         return result;
     }
 
-    async fetchOrderBook (symbol, limit = undefined, params = {}) {
-        await this.loadMarkets ();
+    async fetchOrderBook(symbol, limit = undefined, params = {}) {
+        await this.loadMarkets();
         const request = {
-            'symbol': this.marketId (symbol),
+            'symbol': this.marketId(symbol),
         };
         if (limit !== undefined) {
             request['limit_bids'] = limit;
             request['limit_asks'] = limit;
         }
-        const response = await this.publicGetV1BookSymbol (this.extend (request, params));
-        return this.parseOrderBook (response, undefined, 'bids', 'asks', 'price', 'amount');
+        const response = await this.publicGetV1BookSymbol(this.extend(request, params));
+        return this.parseOrderBook(response, undefined, 'bids', 'asks', 'price', 'amount');
     }
 
-    async fetchTicker (symbol, params = {}) {
-        await this.loadMarkets ();
-        const market = this.market (symbol);
+    async fetchTicker(symbol, params = {}) {
+        await this.loadMarkets();
+        const market = this.market(symbol);
         const request = {
             'symbol': market['id'],
         };
-        const ticker = await this.publicGetV1PubtickerSymbol (this.extend (request, params));
-        const timestamp = this.safeInteger (ticker['volume'], 'timestamp');
+        const ticker = await this.publicGetV1PubtickerSymbol(this.extend(request, params));
+        const timestamp = this.safeInteger(ticker['volume'], 'timestamp');
         const baseCurrency = market['base']; // unified structures are guaranteed to have unified fields
         const quoteCurrency = market['quote']; // so we don't need safe-methods for unified structures
-        const last = this.safeFloat (ticker, 'last');
+        const last = this.safeFloat(ticker, 'last');
         return {
             'symbol': symbol,
             'timestamp': timestamp,
-            'datetime': this.iso8601 (timestamp),
+            'datetime': this.iso8601(timestamp),
             'high': undefined,
             'low': undefined,
-            'bid': this.safeFloat (ticker, 'bid'),
+            'bid': this.safeFloat(ticker, 'bid'),
             'bidVolume': undefined,
-            'ask': this.safeFloat (ticker, 'ask'),
+            'ask': this.safeFloat(ticker, 'ask'),
             'askVolume': undefined,
             'vwap': undefined,
             'open': undefined,
@@ -344,24 +370,23 @@ module.exports = class gemini extends Exchange {
             'change': undefined,
             'percentage': undefined,
             'average': undefined,
-            'baseVolume': this.safeFloat (ticker['volume'], baseCurrency),
-            'quoteVolume': this.safeFloat (ticker['volume'], quoteCurrency),
+            'baseVolume': this.safeFloat(ticker['volume'], baseCurrency),
+            'quoteVolume': this.safeFloat(ticker['volume'], quoteCurrency),
             'info': ticker,
         };
     }
-
-    async fetchTickerV2 (symbol, params = {}) {
+    async fetchTickerV2(symbol, params = {}) {
 
         let V1Ticker = await this.fetchTicker(symbol);
 
-        await this.loadMarkets ();
-        const market = this.market (symbol);
+        await this.loadMarkets();
+        const market = this.market(symbol);
         const request = {
             'symbol': market['id'],
         };
-        const ticker = await this.publicGetV2TickerSymbol (this.extend (request, params));
-        const high = this.safeFloat (ticker, 'high');
-        const low = this.safeFloat (ticker, 'low');
+        const ticker = await this.publicGetV2TickerSymbol(this.extend(request, params));
+        const high = this.safeFloat(ticker, 'high');
+        const low = this.safeFloat(ticker, 'low');
 
         V1Ticker.high = high;
         V1Ticker.low = low;
@@ -369,8 +394,8 @@ module.exports = class gemini extends Exchange {
         return V1Ticker;
     }
 
-    async fetchTickers (symbol = undefined, limit = undefined, params = {}) {
-        await this.loadMarkets ();
+    async fetchTickers(symbol = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets();
         const market = this.markets;
 
         let pairs = Object.keys(market);
@@ -380,14 +405,14 @@ module.exports = class gemini extends Exchange {
         let promiseThrottle = new PromiseThrottle({
             requestsPerSecond: 1,           // up to 1 request per second
             promiseImplementation: Promise  // the Promise library you are using
-          });
+        });
 
-        pairs.map(pair=>{
-            promise.push(promiseThrottle.add(this.fetchTickerV2.bind(this,pair)));
+        pairs.map(pair => {
+            promise.push(promiseThrottle.add(this.fetchTickerV2.bind(this, pair)));
         })
 
-        await Promise.all(promise).then(data=>{
-            data.map((ticker)=>{
+        await Promise.all(promise).then(data => {
+            data.map((ticker) => {
                 tickers[ticker.symbol] = ticker;
             })
         });
@@ -395,18 +420,18 @@ module.exports = class gemini extends Exchange {
         return tickers;
     }
 
-    parseTrade (trade, market = undefined) {
-        const timestamp = this.safeInteger (trade, 'timestampms');
-        const id = this.safeString (trade, 'tid');
-        const orderId = this.safeString (trade, 'order_id');
-        const feeCurrencyId = this.safeString (trade, 'fee_currency');
-        const feeCurrencyCode = this.safeCurrencyCode (feeCurrencyId);
+    parseTrade(trade, market = undefined) {
+        const timestamp = this.safeInteger(trade, 'timestampms');
+        const id = this.safeString(trade, 'tid');
+        const orderId = this.safeString(trade, 'order_id');
+        const feeCurrencyId = this.safeString(trade, 'fee_currency');
+        const feeCurrencyCode = this.safeCurrencyCode(feeCurrencyId);
         const fee = {
-            'cost': this.safeFloat (trade, 'fee_amount'),
+            'cost': this.safeFloat(trade, 'fee_amount'),
             'currency': feeCurrencyCode,
         };
-        const price = this.safeFloat (trade, 'price');
-        const amount = this.safeFloat (trade, 'amount');
+        const price = this.safeFloat(trade, 'price');
+        const amount = this.safeFloat(trade, 'amount');
         let cost = undefined;
         if (price !== undefined) {
             if (amount !== undefined) {
@@ -414,7 +439,7 @@ module.exports = class gemini extends Exchange {
             }
         }
         const type = undefined;
-        const side = this.safeStringLower (trade, 'type');
+        const side = this.safeStringLower(trade, 'type');
         let symbol = undefined;
         if (market !== undefined) {
             symbol = market['symbol'];
@@ -424,7 +449,7 @@ module.exports = class gemini extends Exchange {
             'order': orderId,
             'info': trade,
             'timestamp': timestamp,
-            'datetime': this.iso8601 (timestamp),
+            'datetime': this.iso8601(timestamp),
             'symbol': symbol,
             'type': type,
             'side': side,
@@ -436,37 +461,37 @@ module.exports = class gemini extends Exchange {
         };
     }
 
-    async fetchTrades (symbol, since = undefined, limit = undefined, params = {}) {
-        await this.loadMarkets ();
-        const market = this.market (symbol);
+    async fetchTrades(symbol, since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets();
+        const market = this.market(symbol);
         const request = {
             'symbol': market['id'],
         };
-        const response = await this.publicGetV1TradesSymbol (this.extend (request, params));
-        return this.parseTrades (response, market, since, limit);
+        const response = await this.publicGetV1TradesSymbol(this.extend(request, params));
+        return this.parseTrades(response, market, since, limit);
     }
 
-    async fetchBalance (params = {}) {
-        await this.loadMarkets ();
-        const response = await this.privatePostV1Balances (params);
+    async fetchBalance(params = {}) {
+        await this.loadMarkets();
+        const response = await this.privatePostV1Balances(params);
         const result = { 'info': response };
         for (let i = 0; i < response.length; i++) {
             const balance = response[i];
-            const currencyId = this.safeString (balance, 'currency');
-            const code = this.safeCurrencyCode (currencyId);
-            const account = this.account ();
-            account['free'] = this.safeFloat (balance, 'available');
-            account['total'] = this.safeFloat (balance, 'amount');
+            const currencyId = this.safeString(balance, 'currency');
+            const code = this.safeCurrencyCode(currencyId);
+            const account = this.account();
+            account['free'] = this.safeFloat(balance, 'available');
+            account['total'] = this.safeFloat(balance, 'amount');
             result[code] = account;
         }
-        return this.parseBalance (result);
+        return this.parseBalance(result);
     }
 
-    parseOrder (order, market = undefined) {
-        const timestamp = this.safeInteger (order, 'timestampms');
-        const amount = this.safeFloat (order, 'original_amount');
-        const remaining = this.safeFloat (order, 'remaining_amount');
-        const filled = this.safeFloat (order, 'executed_amount');
+    parseOrder(order, market = undefined) {
+        const timestamp = this.safeInteger(order, 'timestampms');
+        const amount = this.safeFloat(order, 'original_amount');
+        const remaining = this.safeFloat(order, 'remaining_amount');
+        const filled = this.safeFloat(order, 'executed_amount');
         let status = 'closed';
         if (order['is_live']) {
             status = 'open';
@@ -474,15 +499,15 @@ module.exports = class gemini extends Exchange {
         if (order['is_cancelled']) {
             status = 'canceled';
         }
-        const price = this.safeFloat (order, 'price');
-        const average = this.safeFloat (order, 'avg_execution_price');
+        const price = this.safeFloat(order, 'price');
+        const average = this.safeFloat(order, 'avg_execution_price');
         let cost = undefined;
         if (filled !== undefined) {
             if (average !== undefined) {
                 cost = filled * average;
             }
         }
-        let type = this.safeString (order, 'type');
+        let type = this.safeString(order, 'type');
         if (type === 'exchange limit') {
             type = 'limit';
         } else if (type === 'market buy' || type === 'market sell') {
@@ -493,7 +518,7 @@ module.exports = class gemini extends Exchange {
         const fee = undefined;
         let symbol = undefined;
         if (market === undefined) {
-            const marketId = this.safeString (order, 'symbol');
+            const marketId = this.safeString(order, 'symbol');
             if (marketId in this.markets_by_id) {
                 market = this.markets_by_id[marketId];
             }
@@ -501,13 +526,15 @@ module.exports = class gemini extends Exchange {
         if (market !== undefined) {
             symbol = market['symbol'];
         }
-        const id = this.safeString (order, 'order_id');
-        const side = this.safeStringLower (order, 'side');
+        const id = this.safeString(order, 'order_id');
+        const side = this.safeStringLower(order, 'side');
+        const clientOrderId = this.safeString(order, 'client_order_id');
         return {
             'id': id,
+            'clientOrderId': clientOrderId,
             'info': order,
             'timestamp': timestamp,
-            'datetime': this.iso8601 (timestamp),
+            'datetime': this.iso8601(timestamp),
             'lastTradeTimestamp': undefined,
             'status': status,
             'symbol': symbol,
@@ -520,64 +547,70 @@ module.exports = class gemini extends Exchange {
             'filled': filled,
             'remaining': remaining,
             'fee': fee,
+            'trades': undefined,
         };
     }
 
-    async fetchOrder (id, symbol = undefined, params = {}) {
-        await this.loadMarkets ();
+    async fetchOrder(id, symbol = undefined, params = {}) {
+        await this.loadMarkets();
         const request = {
             'order_id': id,
         };
-        const response = await this.privatePostV1OrderStatus (this.extend (request, params));
-        return this.parseOrder (response);
+        const response = await this.privatePostV1OrderStatus(this.extend(request, params));
+        return this.parseOrder(response);
     }
 
-    async fetchOpenOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
-        await this.loadMarkets ();
-        const response = await this.privatePostV1Orders (params);
-        let orders = this.parseOrders (response, undefined, since, limit);
+    async fetchOpenOrders(symbol = undefined, since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets();
+        const response = await this.privatePostV1Orders(params);
+        let orders = this.parseOrders(response, undefined, since, limit);
         if (symbol !== undefined) {
-            const market = this.market (symbol); // throws on non-existent symbol
-            orders = this.filterBySymbol (orders, market['symbol']);
+            const market = this.market(symbol); // throws on non-existent symbol
+            orders = this.filterBySymbol(orders, market['symbol']);
         }
         return orders;
     }
 
-    async createOrder (symbol, type, side, amount, price = undefined, params = {}) {
-        await this.loadMarkets ();
+    async createOrder(symbol, type, side, amount, price = undefined, params = {}) {
+        await this.loadMarkets();
         if (type === 'market') {
-            throw new ExchangeError (this.id + ' allows limit orders only');
+            throw new ExchangeError(this.id + ' allows limit orders only');
         }
-        const nonce = this.nonce ();
+        const nonce = this.nonce();
         const request = {
-            'client_order_id': nonce.toString (),
-            'symbol': this.marketId (symbol),
-            'amount': amount.toString (),
-            'price': price.toString (),
+            'client_order_id': nonce.toString(),
+            'symbol': this.marketId(symbol),
+            'amount': amount.toString(),
+            'price': price.toString(),
             'side': side,
             'type': 'exchange limit', // gemini allows limit orders only
         };
-        const response = await this.privatePostV1OrderNew (this.extend (request, params));
+        if (type == 'stop_limit') {
+            request['type'] = 'exchange stop limit';
+            request['stop_price'] = params.stopPrice.toString();
+            params = {};
+        }
+        const response = await this.privatePostV1OrderNew(this.extend(request, params));
         return {
             'info': response,
             'id': response['order_id'],
         };
     }
 
-    async cancelOrder (id, symbol = undefined, params = {}) {
-        await this.loadMarkets ();
+    async cancelOrder(id, symbol = undefined, params = {}) {
+        await this.loadMarkets();
         const request = {
             'order_id': id,
         };
-        return await this.privatePostV1OrderCancel (this.extend (request, params));
+        return await this.privatePostV1OrderCancel(this.extend(request, params));
     }
 
-    async fetchMyTrades (symbol = undefined, since = undefined, limit = undefined, params = {}) {
+    async fetchMyTrades(symbol = undefined, since = undefined, limit = undefined, params = {}) {
         if (symbol === undefined) {
-            throw new ArgumentsRequired (this.id + ' fetchMyTrades requires a symbol argument');
+            throw new ArgumentsRequired(this.id + ' fetchMyTrades requires a symbol argument');
         }
-        await this.loadMarkets ();
-        const market = this.market (symbol);
+        await this.loadMarkets();
+        const market = this.market(symbol);
         const request = {
             'symbol': market['id'],
         };
@@ -585,34 +618,34 @@ module.exports = class gemini extends Exchange {
             request['limit_trades'] = limit;
         }
         if (since !== undefined) {
-            request['timestamp'] = parseInt (since / 1000);
+            request['timestamp'] = parseInt(since / 1000);
         }
-        const response = await this.privatePostV1Mytrades (this.extend (request, params));
-        return this.parseTrades (response, market, since, limit);
+        const response = await this.privatePostV1Mytrades(this.extend(request, params));
+        return this.parseTrades(response, market, since, limit);
     }
 
-    async withdraw (code, amount, address, tag = undefined, params = {}) {
-        this.checkAddress (address);
-        await this.loadMarkets ();
-        const currency = this.currency (code);
+    async withdraw(code, amount, address, tag = undefined, params = {}) {
+        this.checkAddress(address);
+        await this.loadMarkets();
+        const currency = this.currency(code);
         const request = {
             'currency': currency['id'],
             'amount': amount,
             'address': address,
         };
-        const response = await this.privatePostV1WithdrawCurrency (this.extend (request, params));
+        const response = await this.privatePostV1WithdrawCurrency(this.extend(request, params));
         return {
             'info': response,
-            'id': this.safeString (response, 'txHash'),
+            'id': this.safeString(response, 'txHash'),
         };
     }
 
-    nonce () {
-        return this.milliseconds ();
+    nonce() {
+        return this.milliseconds();
     }
 
-    async fetchTransactions (code = undefined, since = undefined, limit = undefined, params = {}) {
-        await this.loadMarkets ();
+    async fetchTransactions(code = undefined, since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets();
         const request = {};
         if (limit !== undefined) {
             request['limit_transfers'] = limit;
@@ -620,23 +653,23 @@ module.exports = class gemini extends Exchange {
         if (since !== undefined) {
             request['timestamp'] = since;
         }
-        const response = await this.privatePostV1Transfers (this.extend (request, params));
-        return this.parseTransactions (response);
+        const response = await this.privatePostV1Transfers(this.extend(request, params));
+        return this.parseTransactions(response);
     }
 
-    parseTransaction (transaction, currency = undefined) {
-        const timestamp = this.safeInteger (transaction, 'timestampms');
-        const currencyId = this.safeString (transaction, 'currency');
-        const code = this.safeCurrencyCode (currencyId, currency);
-        const address = this.safeString (transaction, 'destination');
-        const type = this.safeStringLower (transaction, 'type');
+    parseTransaction(transaction, currency = undefined) {
+        const timestamp = this.safeInteger(transaction, 'timestampms');
+        const currencyId = this.safeString(transaction, 'currency');
+        const code = this.safeCurrencyCode(currencyId, currency);
+        const address = this.safeString(transaction, 'destination');
+        const type = this.safeStringLower(transaction, 'type');
         let status = 'pending';
         // When deposits show as Advanced or Complete they are available for trading.
         if (transaction['status']) {
             status = 'ok';
         }
         let fee = undefined;
-        const feeAmount = this.safeFloat (transaction, 'feeAmount');
+        const feeAmount = this.safeFloat(transaction, 'feeAmount');
         if (feeAmount !== undefined) {
             fee = {
                 'cost': feeAmount,
@@ -645,14 +678,14 @@ module.exports = class gemini extends Exchange {
         }
         return {
             'info': transaction,
-            'id': this.safeString (transaction, 'eid'),
-            'txid': this.safeString (transaction, 'txHash'),
+            'id': this.safeString(transaction, 'eid'),
+            'txid': this.safeString(transaction, 'txHash'),
             'timestamp': timestamp,
-            'datetime': this.iso8601 (timestamp),
+            'datetime': this.iso8601(timestamp),
             'address': address,
             'tag': undefined, // or is it defined?
             'type': type, // direction of the transaction, ('deposit' | 'withdraw')
-            'amount': this.safeFloat (transaction, 'amount'),
+            'amount': this.safeFloat(transaction, 'amount'),
             'currency': code,
             'status': status,
             'updated': undefined,
@@ -660,36 +693,40 @@ module.exports = class gemini extends Exchange {
         };
     }
 
-    sign (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
-        let url = '/' + this.implodeParams (path, params);
-        const query = this.omit (params, this.extractParams (path));
+    sign(path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
+        let url = '/' + this.implodeParams(path, params);
+        const query = this.omit(params, this.extractParams(path));
         if (api === 'private') {
-            this.checkRequiredCredentials ();
-            const nonce = this.nonce ();
-            const request = this.extend ({
+            this.checkRequiredCredentials();
+            const nonce = this.nonce();
+            const request = this.extend({
                 'request': url,
                 'nonce': nonce,
             }, query);
-            let payload = this.json (request);
-            payload = this.stringToBase64 (this.encode (payload));
-            const signature = this.hmac (payload, this.encode (this.secret), 'sha384');
+            let payload = this.json(request);
+            payload = this.stringToBase64(this.encode(payload));
+            const signature = this.hmac(payload, this.encode(this.secret), 'sha384');
             headers = {
                 'Content-Type': 'text/plain',
                 'X-GEMINI-APIKEY': this.apiKey,
-                'X-GEMINI-PAYLOAD': this.decode (payload),
+                'X-GEMINI-PAYLOAD': this.decode(payload),
                 'X-GEMINI-SIGNATURE': signature,
             };
         } else {
-            if (Object.keys (query).length) {
-                url += '?' + this.urlencode (query);
+            if (Object.keys(query).length) {
+                url += '?' + this.urlencode(query);
             }
         }
         url = this.urls['api'][api] + url;
         return { 'url': url, 'method': method, 'body': body, 'headers': headers };
     }
 
-    handleErrors (httpCode, reason, url, method, headers, body, response, requestHeaders, requestBody) {
+    handleErrors(httpCode, reason, url, method, headers, body, response, requestHeaders, requestBody) {
         if (response === undefined) {
+            if (typeof body === 'string') {
+                const feedback = this.id + ' ' + body;
+                this.throwBroadlyMatchedException(this.exceptions['broad'], body, feedback);
+            }
             return; // fallback to default error handler
         }
         //
@@ -699,35 +736,27 @@ module.exports = class gemini extends Exchange {
         //         "message": "Out-of-sequence nonce <1234> precedes previously used nonce <2345>"
         //     }
         //
-        const result = this.safeString (response, 'result');
+        const result = this.safeString(response, 'result');
         if (result === 'error') {
-            const reason = this.safeString (response, 'reason');
-            const message = this.safeString (response, 'message');
+            const reason = this.safeString(response, 'reason');
+            const message = this.safeString(response, 'message');
             const feedback = this.id + ' ' + message;
-            const exact = this.exceptions['exact'];
-            if (reason in exact) {
-                throw new exact[reason] (feedback);
-            } else if (message in exact) {
-                throw new exact[message] (feedback);
-            }
-            const broad = this.exceptions['broad'];
-            const broadKey = this.findBroadlyMatchedKey (broad, message);
-            if (broadKey !== undefined) {
-                throw new broad[broadKey] (feedback);
-            }
-            throw new ExchangeError (feedback); // unknown message
+            this.throwExactlyMatchedException(this.exceptions['exact'], reason, feedback);
+            this.throwExactlyMatchedException(this.exceptions['exact'], message, feedback);
+            this.throwBroadlyMatchedException(this.exceptions['broad'], message, feedback);
+            throw new ExchangeError(feedback); // unknown message
         }
     }
 
-    async createDepositAddress (code, params = {}) {
-        await this.loadMarkets ();
-        const currency = this.currency (code);
+    async createDepositAddress(code, params = {}) {
+        await this.loadMarkets();
+        const currency = this.currency(code);
         const request = {
             'currency': currency['id'],
         };
-        const response = await this.privatePostV1DepositCurrencyNewAddress (this.extend (request, params));
-        const address = this.safeString (response, 'address');
-        this.checkAddress (address);
+        const response = await this.privatePostV1DepositCurrencyNewAddress(this.extend(request, params));
+        const address = this.safeString(response, 'address');
+        this.checkAddress(address);
         return {
             'currency': code,
             'address': address,
@@ -736,14 +765,21 @@ module.exports = class gemini extends Exchange {
         };
     }
 
-    async fetchOHLCV (symbol, timeframe = '5m', since = undefined, limit = undefined, params = {}) {
-        await this.loadMarkets ();
-        const market = this.market (symbol);
+    async fetchOHLCV(symbol, timeframe = '5m', since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets();
+        const market = this.market(symbol);
         const request = {
             'timeframe': this.timeframes[timeframe],
             'symbol': market['id'],
         };
-        const response = await this.publicGetV2CandlesSymbolTimeframe (this.extend (request, params));
-        return this.parseOHLCVs (response, market, timeframe, since, limit);
+        const response = await this.publicGetV2CandlesSymbolTimeframe(this.extend(request, params));
+        //
+        //     [
+        //         [1591515000000,0.02509,0.02509,0.02509,0.02509,0],
+        //         [1591514700000,0.02503,0.02509,0.02503,0.02509,44.6405],
+        //         [1591514400000,0.02503,0.02503,0.02503,0.02503,0],
+        //     ]
+        //
+        return this.parseOHLCVs(response, market, timeframe, since, limit);
     }
 };
