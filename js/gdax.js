@@ -591,7 +591,7 @@ module.exports = class gdax extends Exchange {
             'status': 'done',
         };
         let market = undefined;
-        if (symbol !== undefined) {
+        if (symbol) {
             market = this.market (symbol);
             request['product_id'] = market['id'];
         }
@@ -610,7 +610,12 @@ module.exports = class gdax extends Exchange {
         };
         if (type === 'limit')
             order['price'] = this.priceToPrecision (symbol, price);
-        let response = await this.privatePostOrders (this.extend (order, params));
+        if(params.stopPrice){
+            order['stop'] = 'loss';
+            order['type'] = 'limit';
+            order['stop_price'] = this.priceToPrecision (symbol, params.stopPrice);
+        }
+        let response = await this.privatePostOrders (this.extend (order, {}));
         return this.parseOrder (response);
     }
 
@@ -865,10 +870,8 @@ module.exports = class gdax extends Exchange {
 
     async request (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
         let response = await this.fetch2 (path, api, method, params, headers, body);
-        if(typeof(response) === "object"){
-            if ('message' in response) {
+        if ('message' in response) {
             throw new ExchangeError (this.id + ' ' + this.json (response));
-            }
         }
         return response;
     }

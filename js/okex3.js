@@ -2,20 +2,22 @@
 
 //  ---------------------------------------------------------------------------
 
-const Exchange = require ('./base/Exchange');
-const { ExchangeError, ExchangeNotAvailable, ArgumentsRequired, BadRequest, AccountSuspended, InvalidAddress, PermissionDenied, DDoSProtection, InsufficientFunds, InvalidNonce, CancelPending, InvalidOrder, OrderNotFound, AuthenticationError, RequestTimeout, NotSupported } = require ('./base/errors');
+const Exchange = require('./base/Exchange');
+const { ExchangeError, ExchangeNotAvailable, OnMaintenance, ArgumentsRequired, BadRequest, AccountSuspended, InvalidAddress, PermissionDenied, DDoSProtection, InsufficientFunds, InvalidNonce, CancelPending, InvalidOrder, OrderNotFound, AuthenticationError, RequestTimeout, NotSupported, BadSymbol } = require('./base/errors');
+const { TICK_SIZE, TRUNCATE } = require('./base/functions/number');
 const { redisRead, redisWrite } = require('../../../lib/utils');
 
 //  ---------------------------------------------------------------------------
 
 module.exports = class okex3 extends Exchange {
-    describe () {
-        return this.deepExtend (super.describe (), {
+    describe() {
+        return this.deepExtend(super.describe(), {
             'id': 'okex3',
             'name': 'OKEX',
-            'countries': [ 'CN', 'US' ],
+            'countries': ['CN', 'US'],
             'version': 'v3',
             'rateLimit': 1000, // up to 3000 requests per 5 minutes ≈ 600 requests per minute ≈ 10 requests per second ≈ 100 ms
+            'pro': true,
             'has': {
                 'CORS': false,
                 'fetchOHLCV': true,
@@ -26,8 +28,9 @@ module.exports = class okex3 extends Exchange {
                 'fetchCurrencies': false, // see below
                 'fetchDeposits': true,
                 'fetchWithdrawals': true,
+                'fetchTime': true,
                 'fetchTransactions': false,
-                'fetchMyTrades': false, // they don't have it
+                'fetchMyTrades': true,
                 'fetchDepositAddress': true,
                 'fetchOrderTrades': true,
                 'fetchTickers': true,
@@ -49,12 +52,19 @@ module.exports = class okex3 extends Exchange {
                 '1d': '86400',
                 '1w': '604800',
             },
+            'hostname': 'okex.com',
             'urls': {
                 'logo': 'https://user-images.githubusercontent.com/1294454/32552768-0d6dd3c6-c4a6-11e7-90f8-c043b64756a7.jpg',
-                'api': 'https://www.okex.com',
+                'api': {
+                    'rest': 'https://www.{hostname}',
+                },
                 'www': 'https://www.okex.com',
                 'doc': 'https://www.okex.com/docs/en/',
                 'fees': 'https://www.okex.com/pages/products/fees.html',
+                'referral': 'https://www.okex.com/join/1888677',
+                'test': {
+                    'rest': 'https://testnet.okex.com',
+                },
             },
             'api': {
                 'general': {
@@ -64,16 +74,18 @@ module.exports = class okex3 extends Exchange {
                 },
                 'account': {
                     'get': [
-                        'currencies',
                         'wallet',
+                        'sub-account',
+                        'asset-valuation',
                         'wallet/{currency}',
-                        'withdrawal/fee',
                         'withdrawal/history',
                         'withdrawal/history/{currency}',
                         'ledger',
                         'deposit/address',
                         'deposit/history',
                         'deposit/history/{currency}',
+                        'currencies',
+                        'withdrawal/fee',
                     ],
                     'post': [
                         'transfer',
@@ -89,7 +101,9 @@ module.exports = class okex3 extends Exchange {
                         'orders_pending',
                         'orders/{order_id}',
                         'orders/{client_oid}',
+                        'trade_fee',
                         'fills',
+                        'algo',
                         // public
                         'instruments',
                         'instruments/{instrument_id}/book',
@@ -99,10 +113,12 @@ module.exports = class okex3 extends Exchange {
                         'instruments/{instrument_id}/candles',
                     ],
                     'post': [
+                        'order_algo',
                         'orders',
                         'batch_orders',
                         'cancel_orders/{order_id}',
                         'cancel_orders/{client_oid}',
+                        'cancel_batch_algos',
                         'cancel_batch_orders',
                     ],
                 },
@@ -116,10 +132,13 @@ module.exports = class okex3 extends Exchange {
                         'accounts/borrowed',
                         'accounts/{instrument_id}/borrowed',
                         'orders',
+                        'accounts/{instrument_id}/leverage',
                         'orders/{order_id}',
                         'orders/{client_oid}',
                         'orders_pending',
                         'fills',
+                        // public
+                        'instruments/{instrument_id}/mark_price',
                     ],
                     'post': [
                         'accounts/borrow',
@@ -130,6 +149,7 @@ module.exports = class okex3 extends Exchange {
                         'cancel_orders/{order_id}',
                         'cancel_orders/{client_oid}',
                         'cancel_batch_orders',
+                        'accounts/{instrument_id}/leverage',
                     ],
                 },
                 'futures': {
@@ -137,13 +157,17 @@ module.exports = class okex3 extends Exchange {
                         'position',
                         '{instrument_id}/position',
                         'accounts',
-                        'accounts/{currency}',
-                        'accounts/{currency}/leverage',
-                        'accounts/{currency}/ledger',
+                        'accounts/{underlying}',
+                        'accounts/{underlying}/leverage',
+                        'accounts/{underlying}/ledger',
+                        'order_algo/{instrument_id}',
                         'orders/{instrument_id}',
                         'orders/{instrument_id}/{order_id}',
                         'orders/{instrument_id}/{client_oid}',
                         'fills',
+                        'trade_fee',
+                        'accounts/{instrument_id}/holds',
+                        'order_algo/{instrument_id}',
                         // public
                         'instruments',
                         'instruments/{instrument_id}/book',
@@ -151,22 +175,26 @@ module.exports = class okex3 extends Exchange {
                         'instruments/{instrument_id}/ticker',
                         'instruments/{instrument_id}/trades',
                         'instruments/{instrument_id}/candles',
-                        'accounts/{instrument_id}/holds',
                         'instruments/{instrument_id}/index',
                         'rate',
                         'instruments/{instrument_id}/estimated_price',
                         'instruments/{instrument_id}/open_interest',
                         'instruments/{instrument_id}/price_limit',
-                        'instruments/{instrument_id}/liquidation',
                         'instruments/{instrument_id}/mark_price',
+                        'instruments/{instrument_id}/liquidation',
                     ],
                     'post': [
-                        'accounts/{currency}/leverage',
+                        'accounts/{underlying}/leverage',
                         'order',
                         'orders',
                         'cancel_order/{instrument_id}/{order_id}',
                         'cancel_order/{instrument_id}/{client_oid}',
                         'cancel_batch_orders/{instrument_id}',
+                        'accounts/margin_mode',
+                        'close_position',
+                        'cancel_all',
+                        'order_algo',
+                        'cancel_algos',
                     ],
                 },
                 'swap': {
@@ -177,14 +205,16 @@ module.exports = class okex3 extends Exchange {
                         '{instrument_id}/accounts',
                         'accounts/{instrument_id}/settings',
                         'accounts/{instrument_id}/ledger',
-                        'accounts/{instrument_id}/holds',
                         'orders/{instrument_id}',
                         'orders/{instrument_id}/{order_id}',
                         'orders/{instrument_id}/{client_oid}',
                         'fills',
+                        'accounts/{instrument_id}/holds',
+                        'trade_fee',
+                        'order_algo/{instrument_id}',
                         // public
                         'instruments',
-                        'instruments/{instrument_id}/depth?size=50',
+                        'instruments/{instrument_id}/depth',
                         'instruments/ticker',
                         'instruments/{instrument_id}/ticker',
                         'instruments/{instrument_id}/trades',
@@ -205,22 +235,44 @@ module.exports = class okex3 extends Exchange {
                         'cancel_order/{instrument_id}/{order_id}',
                         'cancel_order/{instrument_id}/{client_oid}',
                         'cancel_batch_orders/{instrument_id}',
+                        'order_algo',
+                        'cancel_algos',
                     ],
                 },
-                // they have removed this part from public
-                'ett': {
+                'option': {
                     'get': [
                         'accounts',
-                        'accounts/{currency}',
-                        'accounts/{currency}/ledger',
-                        'orders', // fetchOrder, fetchOrders
+                        '{underlying}/position',
+                        'accounts/{underlying}',
+                        'orders/{underlying}',
+                        'fills/{underlying}',
+                        'accounts/{underlying}/ledger',
+                        'trade_fee',
+                        'orders/{underlying}/{order_id}',
+                        'orders/{underlying}/{client_oid}',
                         // public
-                        'constituents/{ett}',
-                        'define-price/{ett}',
+                        'underlying',
+                        'instruments/{underlying}',
+                        'instruments/{underlying}/summary',
+                        'instruments/{underlying}/summary/{instrument_id}',
+                        'instruments/{instrument_id}/book',
+                        'instruments/{instrument_id}/trades',
+                        'instruments/{instrument_id}/ticker',
+                        'instruments/{instrument_id}/candles',
                     ],
                     'post': [
+                        'order',
                         'orders',
-                        'orders/{order_id}',
+                        'cancel_order/{underlying}/{order_id}',
+                        'cancel_order/{underlying}/{client_oid}',
+                        'cancel_batch_orders/{underlying}',
+                        'amend_order/{underlying}',
+                        'amend_batch_orders/{underlying}',
+                    ],
+                },
+                'index': {
+                    'get': [
+                        '{instrument_id}/constituents',
                     ],
                 },
             },
@@ -234,12 +286,12 @@ module.exports = class okex3 extends Exchange {
                     'maker': 0.0010,
                 },
                 'futures': {
-                    'taker': 0.0030,
-                    'maker': 0.0020,
+                    'taker': 0.0005,
+                    'maker': 0.0002,
                 },
                 'swap': {
-                    'taker': 0.0070,
-                    'maker': 0.0020,
+                    'taker': 0.00075,
+                    'maker': 0.00020,
                 },
             },
             'requiredCredentials': {
@@ -257,9 +309,13 @@ module.exports = class okex3 extends Exchange {
                 'exact': {
                     '1': ExchangeError, // { "code": 1, "message": "System error" }
                     // undocumented
-                    'failure to get a peer from the ring-balancer': ExchangeError, // { "message": "failure to get a peer from the ring-balancer" }
+                    'failure to get a peer from the ring-balancer': ExchangeNotAvailable, // { "message": "failure to get a peer from the ring-balancer" }
                     '4010': PermissionDenied, // { "code": 4010, "message": "For the security of your funds, withdrawals are not permitted within 24 hours after changing fund password  / mobile number / Google Authenticator settings " }
                     // common
+                    // '0': ExchangeError, // 200 successful,when the order placement / cancellation / operation is successful
+                    '4001': ExchangeError, // no data received in 30s
+                    '4002': ExchangeError, // Buffer full. cannot write data
+                    // --------------------------------------------------------
                     '30001': AuthenticationError, // { "code": 30001, "message": 'request header "OK_ACCESS_KEY" cannot be blank'}
                     '30002': AuthenticationError, // { "code": 30002, "message": 'request header "OK_ACCESS_SIGN" cannot be blank'}
                     '30003': AuthenticationError, // { "code": 30003, "message": 'request header "OK_ACCESS_TIMESTAMP" cannot be blank'}
@@ -283,7 +339,7 @@ module.exports = class okex3 extends Exchange {
                     '30021': BadRequest, // { "code": 30021, "message": "Json data format error" }, { "code": 30021, "message": "json data format error" }
                     '30022': PermissionDenied, // { "code": 30022, "message": "Api has been frozen" }
                     '30023': BadRequest, // { "code": 30023, "message": "{0} parameter cannot be blank" }
-                    '30024': BadRequest, // { "code": 30024, "message": "{0} parameter value error" }
+                    '30024': BadSymbol, // {"code":30024,"message":"\"instrument_id\" is an invalid parameter"}
                     '30025': BadRequest, // { "code": 30025, "message": "{0} parameter category error" }
                     '30026': DDoSProtection, // { "code": 30026, "message": "requested too frequent" }
                     '30027': AuthenticationError, // { "code": 30027, "message": "login failure" }
@@ -291,13 +347,14 @@ module.exports = class okex3 extends Exchange {
                     '30029': AccountSuspended, // { "code": 30029, "message": "account suspended" }
                     '30030': ExchangeError, // { "code": 30030, "message": "endpoint request failed. Please try again" }
                     '30031': BadRequest, // { "code": 30031, "message": "token does not exist" }
-                    '30032': ExchangeError, // { "code": 30032, "message": "pair does not exist" }
+                    '30032': BadSymbol, // { "code": 30032, "message": "pair does not exist" }
                     '30033': BadRequest, // { "code": 30033, "message": "exchange domain does not exist" }
                     '30034': ExchangeError, // { "code": 30034, "message": "exchange ID does not exist" }
                     '30035': ExchangeError, // { "code": 30035, "message": "trading is not supported in this website" }
                     '30036': ExchangeError, // { "code": 30036, "message": "no relevant data" }
-                    '30038': AuthenticationError, // { "code": 30038, "message": "user does not exist" }
                     '30037': ExchangeNotAvailable, // { "code": 30037, "message": "endpoint is offline or unavailable" }
+                    // '30038': AuthenticationError, // { "code": 30038, "message": "user does not exist" }
+                    '30038': OnMaintenance, // {"client_oid":"","code":"30038","error_code":"30038","error_message":"Matching engine is being upgraded. Please try in about 1 minute.","message":"Matching engine is being upgraded. Please try in about 1 minute.","order_id":"-1","result":false}
                     // futures
                     '32001': AccountSuspended, // { "code": 32001, "message": "futures account suspended" }
                     '32002': PermissionDenied, // { "code": 32002, "message": "futures account does not exist" }
@@ -325,10 +382,51 @@ module.exports = class okex3 extends Exchange {
                     '32024': ExchangeError, // { "code": 32024, "message": "order cannot be placed during delivery" }
                     '32025': ExchangeError, // { "code": 32025, "message": "order cannot be placed during settlement" }
                     '32026': ExchangeError, // { "code": 32026, "message": "your account is restricted from opening positions" }
-                    '32029': ExchangeError, // { "code": 32029, "message": "order info does not exist" }
-                    '32028': ExchangeError, // { "code": 32028, "message": "account is suspended and liquidated" }
                     '32027': ExchangeError, // { "code": 32027, "message": "cancelled over 20 orders" }
+                    '32028': ExchangeError, // { "code": 32028, "message": "account is suspended and liquidated" }
+                    '32029': ExchangeError, // { "code": 32029, "message": "order info does not exist" }
+                    '32030': InvalidOrder, // The order cannot be cancelled
+                    '32031': ArgumentsRequired, // client_oid or order_id is required.
+                    '32038': AuthenticationError, // User does not exist
+                    '32040': ExchangeError, // User have open contract orders or position
                     '32044': ExchangeError, // { "code": 32044, "message": "The margin ratio after submitting this order is lower than the minimum requirement ({0}) for your tier." }
+                    '32045': ExchangeError, // String of commission over 1 million
+                    '32046': ExchangeError, // Each user can hold up to 10 trade plans at the same time
+                    '32047': ExchangeError, // system error
+                    '32048': InvalidOrder, // Order strategy track range error
+                    '32049': ExchangeError, // Each user can hold up to 10 track plans at the same time
+                    '32050': InvalidOrder, // Order strategy rang error
+                    '32051': InvalidOrder, // Order strategy ice depth error
+                    '32052': ExchangeError, // String of commission over 100 thousand
+                    '32053': ExchangeError, // Each user can hold up to 6 ice plans at the same time
+                    '32057': ExchangeError, // The order price is zero. Market-close-all function cannot be executed
+                    '32054': ExchangeError, // Trade not allow
+                    '32055': InvalidOrder, // cancel order error
+                    '32056': ExchangeError, // iceberg per order average should between {0}-{1} contracts
+                    '32058': ExchangeError, // Each user can hold up to 6 initiative plans at the same time
+                    '32059': InvalidOrder, // Total amount should exceed per order amount
+                    '32060': InvalidOrder, // Order strategy type error
+                    '32061': InvalidOrder, // Order strategy initiative limit error
+                    '32062': InvalidOrder, // Order strategy initiative range error
+                    '32063': InvalidOrder, // Order strategy initiative rate error
+                    '32064': ExchangeError, // Time Stringerval of orders should set between 5-120s
+                    '32065': ExchangeError, // Close amount exceeds the limit of Market-close-all (999 for BTC, and 9999 for the rest tokens)
+                    '32066': ExchangeError, // You have open orders. Please cancel all open orders before changing your leverage level.
+                    '32067': ExchangeError, // Account equity < required margin in this setting. Please adjust your leverage level again.
+                    '32068': ExchangeError, // The margin for this position will fall short of the required margin in this setting. Please adjust your leverage level or increase your margin to proceed.
+                    '32069': ExchangeError, // Target leverage level too low. Your account balance is insufficient to cover the margin required. Please adjust the leverage level again.
+                    '32070': ExchangeError, // Please check open position or unfilled order
+                    '32071': ExchangeError, // Your current liquidation mode does not support this action.
+                    '32072': ExchangeError, // The highest available margin for your order’s tier is {0}. Please edit your margin and place a new order.
+                    '32073': ExchangeError, // The action does not apply to the token
+                    '32074': ExchangeError, // The number of contracts of your position, open orders, and the current order has exceeded the maximum order limit of this asset.
+                    '32075': ExchangeError, // Account risk rate breach
+                    '32076': ExchangeError, // Liquidation of the holding position(s) at market price will require cancellation of all pending close orders of the contracts.
+                    '32077': ExchangeError, // Your margin for this asset in futures account is insufficient and the position has been taken over for liquidation. (You will not be able to place orders, close positions, transfer funds, or add margin during this period of time. Your account will be restored after the liquidation is complete.)
+                    '32078': ExchangeError, // Please cancel all open orders before switching the liquidation mode(Please cancel all open orders before switching the liquidation mode)
+                    '32079': ExchangeError, // Your open positions are at high risk.(Please add margin or reduce positions before switching the mode)
+                    '32080': ExchangeError, // Funds cannot be transferred out within 30 minutes after futures settlement
+                    '32083': ExchangeError, // The number of contracts should be a positive multiple of %%. Please place your order again
                     // token and margin trading
                     '33001': PermissionDenied, // { "code": 33001, "message": "margin account for this pair is not enabled yet" }
                     '33002': AccountSuspended, // { "code": 33002, "message": "margin account for this pair is suspended" }
@@ -337,7 +435,7 @@ module.exports = class okex3 extends Exchange {
                     '33005': ExchangeError, // { "code": 33005, "message": "repayment amount must exceed 0" }
                     '33006': ExchangeError, // { "code": 33006, "message": "loan order not found" }
                     '33007': ExchangeError, // { "code": 33007, "message": "status not found" }
-                    '33008': ExchangeError, // { "code": 33008, "message": "loan amount cannot exceed the maximum limit" }
+                    '33008': InsufficientFunds, // { "code": 33008, "message": "loan amount cannot exceed the maximum limit" }
                     '33009': ExchangeError, // { "code": 33009, "message": "user ID is blank" }
                     '33010': ExchangeError, // { "code": 33010, "message": "you cannot cancel an order during session 2 of call auction" }
                     '33011': ExchangeError, // { "code": 33011, "message": "no new market data" }
@@ -359,9 +457,32 @@ module.exports = class okex3 extends Exchange {
                     '33028': InvalidOrder, // { "code": 33028, "message": "the decimal places of the trading price exceeded the limit" }
                     '33029': InvalidOrder, // { "code": 33029, "message": "the decimal places of the trading size exceeded the limit" }
                     '33034': ExchangeError, // { "code": 33034, "message": "You can only place limit order after Call Auction has started" }
+                    '33035': ExchangeError, // This type of order cannot be canceled(This type of order cannot be canceled)
+                    '33036': ExchangeError, // Exceeding the limit of entrust order
+                    '33037': ExchangeError, // The buy order price should be lower than 130% of the trigger price
+                    '33038': ExchangeError, // The sell order price should be higher than 70% of the trigger price
+                    '33039': ExchangeError, // The limit of callback rate is 0 < x <= 5%
+                    '33040': ExchangeError, // The trigger price of a buy order should be lower than the latest transaction price
+                    '33041': ExchangeError, // The trigger price of a sell order should be higher than the latest transaction price
+                    '33042': ExchangeError, // The limit of price variance is 0 < x <= 1%
+                    '33043': ExchangeError, // The total amount must be larger than 0
+                    '33044': ExchangeError, // The average amount should be 1/1000 * total amount <= x <= total amount
+                    '33045': ExchangeError, // The price should not be 0, including trigger price, order price, and price limit
+                    '33046': ExchangeError, // Price variance should be 0 < x <= 1%
+                    '33047': ExchangeError, // Sweep ratio should be 0 < x <= 100%
+                    '33048': ExchangeError, // Per order limit: Total amount/1000 < x <= Total amount
+                    '33049': ExchangeError, // Total amount should be X > 0
+                    '33050': ExchangeError, // Time interval should be 5 <= x <= 120s
+                    '33051': ExchangeError, // cancel order number not higher limit: plan and track entrust no more than 10, ice and time entrust no more than 6
                     '33059': BadRequest, // { "code": 33059, "message": "client_oid or order_id is required" }
                     '33060': BadRequest, // { "code": 33060, "message": "Only fill in either parameter client_oid or order_id" }
+                    '33061': ExchangeError, // Value of a single market price order cannot exceed 100,000 USD
+                    '33062': ExchangeError, // The leverage ratio is too high. The borrowed position has exceeded the maximum position of this leverage ratio. Please readjust the leverage ratio
+                    '33063': ExchangeError, // Leverage multiple is too low, there is insufficient margin in the account, please readjust the leverage ratio
+                    '33064': ExchangeError, // The setting of the leverage ratio cannot be less than 2, please readjust the leverage ratio
+                    '33065': ExchangeError, // Leverage ratio exceeds maximum leverage ratio, please readjust leverage ratio
                     // account
+                    '21009': ExchangeError, // Funds cannot be transferred out within 30 minutes after swap settlement(Funds cannot be transferred out within 30 minutes after swap settlement)
                     '34001': PermissionDenied, // { "code": 34001, "message": "withdrawal suspended" }
                     '34002': InvalidAddress, // { "code": 34002, "message": "please add a withdrawal address" }
                     '34003': ExchangeError, // { "code": 34003, "message": "sorry, this token cannot be withdrawn to xx at the moment" }
@@ -385,6 +506,11 @@ module.exports = class okex3 extends Exchange {
                     '34021': InvalidAddress, // { "code": 34021, "message": "Not verified address" }
                     '34022': ExchangeError, // { "code": 34022, "message": "Withdrawals are not available for sub accounts" }
                     '34023': PermissionDenied, // { "code": 34023, "message": "Please enable futures trading before transferring your funds" }
+                    '34026': ExchangeError, // transfer too frequently(transfer too frequently)
+                    '34036': ExchangeError, // Parameter is incorrect, please refer to API documentation
+                    '34037': ExchangeError, // Get the sub-account balance interface, account type is not supported
+                    '34038': ExchangeError, // Since your C2C transaction is unusual, you are restricted from fund transfer. Please contact our customer support to cancel the restriction
+                    '34039': ExchangeError, // You are now restricted from transferring out your funds due to abnormal trades on C2C Market. Please transfer your fund on our website or app instead to verify your identity
                     // swap
                     '35001': ExchangeError, // { "code": 35001, "message": "Contract does not exist" }
                     '35002': ExchangeError, // { "code": 35002, "message": "Contract settling" }
@@ -408,7 +534,9 @@ module.exports = class okex3 extends Exchange {
                     '35030': InvalidOrder, // { "code": 35030, "message": "Order size too large" }
                     '35031': InvalidOrder, // { "code": 35031, "message": "Cancel order size too large" }
                     '35032': ExchangeError, // { "code": 35032, "message": "Invalid user status" }
+                    '35037': ExchangeError, // No last traded price in cache
                     '35039': ExchangeError, // { "code": 35039, "message": "Open order quantity exceeds limit" }
+                    '35040': InvalidOrder, // {"error_message":"Invalid order type","result":"true","error_code":"35040","order_id":"-1"}
                     '35044': ExchangeError, // { "code": 35044, "message": "Invalid order status" }
                     '35046': InsufficientFunds, // { "code": 35046, "message": "Negative account balance" }
                     '35047': InsufficientFunds, // { "code": 35047, "message": "Insufficient account balance" }
@@ -426,54 +554,131 @@ module.exports = class okex3 extends Exchange {
                     '35062': InvalidOrder, // { "code": 35062, "message": "Invalid match_price" }
                     '35063': InvalidOrder, // { "code": 35063, "message": "Invalid order_size" }
                     '35064': InvalidOrder, // { "code": 35064, "message": "Invalid client_oid" }
+                    '35066': InvalidOrder, // Order interval error
+                    '35067': InvalidOrder, // Time-weighted order ratio error
+                    '35068': InvalidOrder, // Time-weighted order range error
+                    '35069': InvalidOrder, // Time-weighted single transaction limit error
+                    '35070': InvalidOrder, // Algo order type error
+                    '35071': InvalidOrder, // Order total must be larger than single order limit
+                    '35072': InvalidOrder, // Maximum 6 unfulfilled time-weighted orders can be held at the same time
+                    '35073': InvalidOrder, // Order price is 0. Market-close-all not available
+                    '35074': InvalidOrder, // Iceberg order single transaction average error
+                    '35075': InvalidOrder, // Failed to cancel order
+                    '35076': InvalidOrder, // LTC 20x leverage. Not allowed to open position
+                    '35077': InvalidOrder, // Maximum 6 unfulfilled iceberg orders can be held at the same time
+                    '35078': InvalidOrder, // Order amount exceeded 100,000
+                    '35079': InvalidOrder, // Iceberg order price variance error
+                    '35080': InvalidOrder, // Callback rate error
+                    '35081': InvalidOrder, // Maximum 10 unfulfilled trail orders can be held at the same time
+                    '35082': InvalidOrder, // Trail order callback rate error
+                    '35083': InvalidOrder, // Each user can only hold a maximum of 10 unfulfilled stop-limit orders at the same time
+                    '35084': InvalidOrder, // Order amount exceeded 1 million
+                    '35085': InvalidOrder, // Order amount is not in the correct range
+                    '35086': InvalidOrder, // Price exceeds 100 thousand
+                    '35087': InvalidOrder, // Price exceeds 100 thousand
+                    '35088': InvalidOrder, // Average amount error
+                    '35089': InvalidOrder, // Price exceeds 100 thousand
+                    '35090': ExchangeError, // No stop-limit orders available for cancelation
+                    '35091': ExchangeError, // No trail orders available for cancellation
+                    '35092': ExchangeError, // No iceberg orders available for cancellation
+                    '35093': ExchangeError, // No trail orders available for cancellation
+                    '35094': ExchangeError, // Stop-limit order last traded price error
+                    '35095': BadRequest, // Instrument_id error
+                    '35096': ExchangeError, // Algo order status error
+                    '35097': ExchangeError, // Order status and order ID cannot exist at the same time
+                    '35098': ExchangeError, // An order status or order ID must exist
+                    '35099': ExchangeError, // Algo order ID error
+                    // option
+                    '36001': BadRequest, // Invalid underlying index.
+                    '36002': BadRequest, // Instrument does not exist.
+                    '36005': ExchangeError, // Instrument status is invalid.
+                    '36101': AuthenticationError, // Account does not exist.
+                    '36102': PermissionDenied, // Account status is invalid.
+                    '36103': PermissionDenied, // Account is suspended due to ongoing liquidation.
+                    '36104': PermissionDenied, // Account is not enabled for options trading.
+                    '36105': PermissionDenied, // Please enable the account for option contract.
+                    '36106': PermissionDenied, // Funds cannot be transferred in or out, as account is suspended.
+                    '36107': PermissionDenied, // Funds cannot be transferred out within 30 minutes after option exercising or settlement.
+                    '36108': InsufficientFunds, // Funds cannot be transferred in or out, as equity of the account is less than zero.
+                    '36109': PermissionDenied, // Funds cannot be transferred in or out during option exercising or settlement.
+                    '36201': PermissionDenied, // New order function is blocked.
+                    '36202': PermissionDenied, // Account does not have permission to short option.
+                    '36203': InvalidOrder, // Invalid format for client_oid.
+                    '36204': ExchangeError, // Invalid format for request_id.
+                    '36205': BadRequest, // Instrument id does not match underlying index.
+                    '36206': BadRequest, // Order_id and client_oid can not be used at the same time.
+                    '36207': InvalidOrder, // Either order price or fartouch price must be present.
+                    '36208': InvalidOrder, // Either order price or size must be present.
+                    '36209': InvalidOrder, // Either order_id or client_oid must be present.
+                    '36210': InvalidOrder, // Either order_ids or client_oids must be present.
+                    '36211': InvalidOrder, // Exceeding max batch size for order submission.
+                    '36212': InvalidOrder, // Exceeding max batch size for oder cancellation.
+                    '36213': InvalidOrder, // Exceeding max batch size for order amendment.
+                    '36214': ExchangeError, // Instrument does not have valid bid/ask quote.
+                    '36216': OrderNotFound, // Order does not exist.
+                    '36217': InvalidOrder, // Order submission failed.
+                    '36218': InvalidOrder, // Order cancellation failed.
+                    '36219': InvalidOrder, // Order amendment failed.
+                    '36220': InvalidOrder, // Order is pending cancel.
+                    '36221': InvalidOrder, // Order qty is not valid multiple of lot size.
+                    '36222': InvalidOrder, // Order price is breaching highest buy limit.
+                    '36223': InvalidOrder, // Order price is breaching lowest sell limit.
+                    '36224': InvalidOrder, // Exceeding max order size.
+                    '36225': InvalidOrder, // Exceeding max open order count for instrument.
+                    '36226': InvalidOrder, // Exceeding max open order count for underlying.
+                    '36227': InvalidOrder, // Exceeding max open size across all orders for underlying
+                    '36228': InvalidOrder, // Exceeding max available qty for instrument.
+                    '36229': InvalidOrder, // Exceeding max available qty for underlying.
+                    '36230': InvalidOrder, // Exceeding max position limit for underlying.
                 },
                 'broad': {
                 },
             },
+            'precisionMode': TICK_SIZE,
             'options': {
-                'fetchMarkets': [ 'spot', 'futures', 'swap' ],
-                'defaultType': 'spot', // 'account', 'spot', 'margin', 'futures', 'swap'
+                'createMarketBuyOrderRequiresPrice': true,
+                'fetchMarkets': ['spot', 'futures', 'swap', 'option'],
+                'defaultType': 'spot', // 'account', 'spot', 'margin', 'futures', 'swap', 'option'
                 'auth': {
                     'time': 'public',
                     'currencies': 'private',
                     'instruments': 'public',
                     'rate': 'public',
-                    'constituents/{ett}': 'public',
-                    'define-price/{ett}': 'public',
+                    '{instrument_id}/constituents': 'public',
                 },
             },
             'commonCurrencies': {
                 // OKEX refers to ERC20 version of Aeternity (AEToken)
                 'AE': 'AET', // https://github.com/ccxt/ccxt/issues/4981
-                'FAIR': 'FairGame',
                 'HOT': 'Hydro Protocol',
                 'HSR': 'HC',
                 'MAG': 'Maggie',
                 'YOYO': 'YOYOW',
+                'WIN': 'WinToken', // https://github.com/ccxt/ccxt/issues/5701
             },
         });
     }
 
-    async fetchTime (params = {}) {
-        const response = await this.generalGetTime (params);
+    async fetchTime(params = {}) {
+        const response = await this.generalGetTime(params);
         //
         //     {
         //         "iso": "2015-01-07T23:47:25.201Z",
         //         "epoch": 1420674445.201
         //     }
         //
-        return this.parse8601 (this.safeString (response, 'iso'));
+        return this.parse8601(this.safeString(response, 'iso'));
     }
 
-    async fetchMarkets (params = {}) {
+    async fetchMarkets(params = {}) {
         let cacheData = await redisRead(this.id + '|markets');
         if (cacheData) return cacheData;
         else {
-            const types = this.safeValue (this.options, 'fetchMarkets');
+            const types = this.safeValue(this.options, 'fetchMarkets');
             let result = [];
             for (let i = 0; i < types.length; i++) {
-                const markets = await this.fetchMarketsByType (types[i], params);
-                result = this.arrayConcat (result, markets);
+                const markets = await this.fetchMarketsByType(types[i], params);
+                result = this.arrayConcat(result, markets);
             }
             // Storing markets in Redis
             await redisWrite(this.id + '|markets', result, false, 60 * 60);
@@ -481,110 +686,126 @@ module.exports = class okex3 extends Exchange {
         }
     }
 
-    async parseMarkets (markets) {
+    parseMarkets(markets) {
         const result = [];
         for (let i = 0; i < markets.length; i++) {
-            result.push (this.parseMarket (markets[i]));
+            result.push(this.parseMarket(markets[i]));
         }
         return result;
     }
 
-    parseMarket (market) {
+    parseMarket(market) {
         //
         // spot markets
         //
-        //     [ {   base_currency: "EOS",
-        //           instrument_id: "EOS-OKB",
-        //                min_size: "0.01",
-        //              product_id: "EOS-OKB",
-        //          quote_currency: "OKB",
-        //          size_increment: "0.000001",
-        //               tick_size: "0.0001"        },
-        //
-        //       ..., // the spot endpoint also returns ETT instruments
-        //
-        //       {   base_currency: "OK06ETT",
-        //          base_increment: "0.00000001",
-        //           base_min_size: "0.01",
-        //           instrument_id: "OK06ETT-USDT",
-        //                min_size: "0.01",
-        //              product_id: "OK06ETT-USDT",
-        //          quote_currency: "USDT",
-        //         quote_increment: "0.0001",
-        //          size_increment: "0.00000001",
-        //               tick_size: "0.0001"        } ]
+        //     {
+        //         base_currency: "EOS",
+        //         instrument_id: "EOS-OKB",
+        //         min_size: "0.01",
+        //         quote_currency: "OKB",
+        //         size_increment: "0.000001",
+        //         tick_size: "0.0001"
+        //     }
         //
         // futures markets
         //
-        //     [ {    instrument_id: "BTG-USD-190329",
-        //         underlying_index: "BTG",
-        //           quote_currency: "USD",
-        //                tick_size: "0.01",
-        //             contract_val: "10",
-        //                  listing: "2018-12-14",
-        //                 delivery: "2019-03-29",
-        //          trade_increment: "1"               }  ]
+        //     {
+        //         instrument_id: "XRP-USD-200320",
+        //         underlying_index: "XRP",
+        //         quote_currency: "USD",
+        //         tick_size: "0.0001",
+        //         contract_val: "10",
+        //         listing: "2020-03-06",
+        //         delivery: "2020-03-20",
+        //         trade_increment: "1",
+        //         alias: "this_week",
+        //         underlying: "XRP-USD",
+        //         base_currency: "XRP",
+        //         settlement_currency: "XRP",
+        //         is_inverse: "true",
+        //         contract_val_currency: "USD",
+        //     }
         //
         // swap markets
         //
-        //     [ {    instrument_id: "BTC-USD-SWAP",
-        //         underlying_index: "BTC",
-        //           quote_currency: "USD",
-        //                     coin: "BTC",
-        //             contract_val: "100",
-        //                  listing: "2018-10-23T20:11:00.443Z",
-        //                 delivery: "2018-10-24T20:11:00.443Z",
-        //           size_increment: "4",
-        //                tick_size: "4"                         }  ]
+        //     {
+        //         instrument_id: "BSV-USD-SWAP",
+        //         underlying_index: "BSV",
+        //         quote_currency: "USD",
+        //         coin: "BSV",
+        //         contract_val: "10",
+        //         listing: "2018-12-21T07:53:47.000Z",
+        //         delivery: "2020-03-14T08:00:00.000Z",
+        //         size_increment: "1",
+        //         tick_size: "0.01",
+        //         base_currency: "BSV",
+        //         underlying: "BSV-USD",
+        //         settlement_currency: "BSV",
+        //         is_inverse: "true",
+        //         contract_val_currency: "USD"
+        //     }
         //
-        const id = this.safeString (market, 'instrument_id');
+        // options markets
+        //
+        //     {
+        //         instrument_id: 'BTC-USD-200327-4000-C',
+        //         underlying: 'BTC-USD',
+        //         settlement_currency: 'BTC',
+        //         contract_val: '0.1000',
+        //         option_type: 'C',
+        //         strike: '4000',
+        //         tick_size: '0.0005',
+        //         lot_size: '1.0000',
+        //         listing: '2019-12-25T08:30:36.302Z',
+        //         delivery: '2020-03-27T08:00:00.000Z',
+        //         state: '2',
+        //         trading_start_time: '2019-12-25T08:30:36.302Z',
+        //         timestamp: '2020-03-13T08:05:09.456Z',
+        //     }
+        //
+        const id = this.safeString(market, 'instrument_id');
         let marketType = 'spot';
         let spot = true;
         let future = false;
         let swap = false;
-        let baseId = this.safeString (market, 'base_currency');
-        if (baseId === undefined) {
-            marketType = 'swap';
-            spot = false;
-            swap = true;
-            baseId = this.safeString (market, 'coin');
-            if (baseId === undefined) {
-                swap = false;
-                future = true;
-                marketType = 'futures';
-                baseId = this.safeString (market, 'underlying_index');
+        let option = false;
+        let baseId = this.safeString(market, 'base_currency');
+        let quoteId = this.safeString(market, 'quote_currency');
+        const contractVal = this.safeFloat(market, 'contract_val');
+        if (contractVal !== undefined) {
+            if ('option_type' in market) {
+                marketType = 'option';
+                spot = false;
+                option = true;
+                const underlying = this.safeString(market, 'underlying');
+                const parts = underlying.split('-');
+                baseId = this.safeString(parts, 0);
+                quoteId = this.safeString(parts, 1);
+            } else {
+                marketType = 'swap';
+                spot = false;
+                swap = true;
+                const futuresAlias = this.safeString(market, 'alias');
+                if (futuresAlias !== undefined) {
+                    swap = false;
+                    future = true;
+                    marketType = 'futures';
+                    baseId = this.safeString(market, 'underlying_index');
+                }
             }
         }
-        const quoteId = this.safeString (market, 'quote_currency');
-        const base = this.commonCurrencyCode (baseId);
-        const quote = this.commonCurrencyCode (quoteId);
+        const base = this.safeCurrencyCode(baseId);
+        const quote = this.safeCurrencyCode(quoteId);
         const symbol = spot ? (base + '/' + quote) : id;
-        let amountPrecision = this.safeString (market, 'size_increment');
-        if (amountPrecision !== undefined) {
-            amountPrecision = this.precisionFromString (amountPrecision);
-        }
-        let pricePrecision = this.safeString (market, 'tick_size');
-        if (pricePrecision !== undefined) {
-            pricePrecision = this.precisionFromString (pricePrecision);
-        }
+        const lotSize = this.safeFloat2(market, 'lot_size', 'trade_increment');
         const precision = {
-            'amount': amountPrecision,
-            'price': pricePrecision,
+            'amount': this.safeFloat(market, 'size_increment', lotSize),
+            'price': this.safeFloat(market, 'tick_size'),
         };
-        const minAmount = this.safeFloat (market, 'base_min_size');
-        let minPrice = this.safeFloat (market, 'tick_size');
-        if (precision['price'] !== undefined) {
-            minPrice = Math.pow (10, -precision['price']);
-        }
-        let minCost = this.safeFloat (market, 'min_size');
-        if (minCost === undefined) {
-            if (minAmount !== undefined && minPrice !== undefined) {
-                minCost = minAmount * minPrice;
-            }
-        }
+        const minAmount = this.safeFloat2(market, 'min_size', 'base_min_size');
         const active = true;
-        const fees = this.safeValue2 (this.fees, marketType, 'trading', {});
-        return this.extend (fees, {
+        const fees = this.safeValue2(this.fees, marketType, 'trading', {});
+        return this.extend(fees, {
             'id': id,
             'symbol': symbol,
             'base': base,
@@ -596,6 +817,7 @@ module.exports = class okex3 extends Exchange {
             'spot': spot,
             'futures': future,
             'swap': swap,
+            'option': option,
             'active': active,
             'precision': precision,
             'limits': {
@@ -604,68 +826,122 @@ module.exports = class okex3 extends Exchange {
                     'max': undefined,
                 },
                 'price': {
-                    'min': minPrice,
+                    'min': precision['price'],
                     'max': undefined,
                 },
                 'cost': {
-                    'min': minCost,
+                    'min': precision['price'],
                     'max': undefined,
                 },
             },
         });
     }
 
-    async fetchMarketsByType (type, params = {}) {
-        const method = type + 'GetInstruments';
-        const response = await this[method] (params);
-        //
-        // spot markets
-        //
-        //     [ {   base_currency: "EOS",
-        //          base_increment: "0.000001",
-        //           base_min_size: "0.01",
-        //           instrument_id: "EOS-OKB",
-        //                min_size: "0.01",
-        //              product_id: "EOS-OKB",
-        //          quote_currency: "OKB",
-        //         quote_increment: "0.0001",
-        //          size_increment: "0.000001",
-        //               tick_size: "0.0001"    }      ]
-        //
-        // futures markets
-        //
-        //     [ {    instrument_id: "BTG-USD-190329",
-        //         underlying_index: "BTG",
-        //           quote_currency: "USD",
-        //                tick_size: "0.01",
-        //             contract_val: "10",
-        //                  listing: "2018-12-14",
-        //                 delivery: "2019-03-29",
-        //          trade_increment: "1"               }  ]
-        //
-        // swap markets
-        //
-        //     [ {    instrument_id: "BTC-USD-SWAP",
-        //         underlying_index: "BTC",
-        //           quote_currency: "USD",
-        //                     coin: "BTC",
-        //             contract_val: "100",
-        //                  listing: "2018-10-23T20:11:00.443Z",
-        //                 delivery: "2018-10-24T20:11:00.443Z",
-        //           size_increment: "4",
-        //                tick_size: "4"                         }  ]
-        //
-        return this.parseMarkets (response);
+    async fetchMarketsByType(type, params = {}) {
+        if (type === 'option') {
+            const underlying = await this.optionGetUnderlying(params);
+            let result = [];
+            for (let i = 0; i < underlying.length; i++) {
+                const response = await this.optionGetInstrumentsUnderlying({
+                    'underlying': underlying[i],
+                });
+                //
+                // options markets
+                //
+                //     [
+                //         {
+                //             instrument_id: 'BTC-USD-200327-4000-C',
+                //             underlying: 'BTC-USD',
+                //             settlement_currency: 'BTC',
+                //             contract_val: '0.1000',
+                //             option_type: 'C',
+                //             strike: '4000',
+                //             tick_size: '0.0005',
+                //             lot_size: '1.0000',
+                //             listing: '2019-12-25T08:30:36.302Z',
+                //             delivery: '2020-03-27T08:00:00.000Z',
+                //             state: '2',
+                //             trading_start_time: '2019-12-25T08:30:36.302Z',
+                //             timestamp: '2020-03-13T08:05:09.456Z',
+                //         },
+                //     ]
+                //
+                result = this.arrayConcat(result, response);
+            }
+            return this.parseMarkets(result);
+        } else if ((type === 'spot') || (type === 'futures') || (type === 'swap')) {
+            const method = type + 'GetInstruments';
+            const response = await this[method](params);
+            //
+            // spot markets
+            //
+            //     [
+            //         {
+            //             base_currency: "EOS",
+            //             instrument_id: "EOS-OKB",
+            //             min_size: "0.01",
+            //             quote_currency: "OKB",
+            //             size_increment: "0.000001",
+            //             tick_size: "0.0001"
+            //         }
+            //     ]
+            //
+            // futures markets
+            //
+            //     [
+            //         {
+            //             instrument_id: "XRP-USD-200320",
+            //             underlying_index: "XRP",
+            //             quote_currency: "USD",
+            //             tick_size: "0.0001",
+            //             contract_val: "10",
+            //             listing: "2020-03-06",
+            //             delivery: "2020-03-20",
+            //             trade_increment: "1",
+            //             alias: "this_week",
+            //             underlying: "XRP-USD",
+            //             base_currency: "XRP",
+            //             settlement_currency: "XRP",
+            //             is_inverse: "true",
+            //             contract_val_currency: "USD",
+            //         }
+            //     ]
+            //
+            // swap markets
+            //
+            //     [
+            //         {
+            //             instrument_id: "BSV-USD-SWAP",
+            //             underlying_index: "BSV",
+            //             quote_currency: "USD",
+            //             coin: "BSV",
+            //             contract_val: "10",
+            //             listing: "2018-12-21T07:53:47.000Z",
+            //             delivery: "2020-03-14T08:00:00.000Z",
+            //             size_increment: "1",
+            //             tick_size: "0.01",
+            //             base_currency: "BSV",
+            //             underlying: "BSV-USD",
+            //             settlement_currency: "BSV",
+            //             is_inverse: "true",
+            //             contract_val_currency: "USD"
+            //         }
+            //     ]
+            //
+            return this.parseMarkets(response);
+        } else {
+            throw new NotSupported(this.id + ' fetchMarketsByType does not support market type ' + type);
+        }
     }
 
-    async fetchCurrencies (params = {}) {
+    async fetchCurrencies(params = {}) {
         // has['fetchCurrencies'] is currently set to false
         // despite that their docs say these endpoints are public:
         //     https://www.okex.com/api/account/v3/withdrawal/fee
         //     https://www.okex.com/api/account/v3/currencies
         // it will still reply with { "code":30001, "message": "OK-ACCESS-KEY header is required" }
         // if you attempt to access it without authentication
-        const response = await this.accountGetCurrencies (params);
+        const response = await this.accountGetCurrencies(params);
         //
         //     [
         //         {
@@ -680,12 +956,12 @@ module.exports = class okex3 extends Exchange {
         const result = {};
         for (let i = 0; i < response.length; i++) {
             const currency = response[i];
-            const id = this.safeString (currency, 'currency');
-            const code = this.commonCurrencyCode (id);
+            const id = this.safeString(currency, 'currency');
+            const code = this.safeCurrencyCode(id);
             const precision = 8; // default precision, todo: fix "magic constants"
-            const name = this.safeString (currency, 'name');
-            const canDeposit = this.safeInteger (currency, 'can_deposit');
-            const canWithdraw = this.safeInteger (currency, 'can_withdraw');
+            const name = this.safeString(currency, 'name');
+            const canDeposit = this.safeInteger(currency, 'can_deposit');
+            const canWithdraw = this.safeInteger(currency, 'can_withdraw');
             const active = canDeposit && canWithdraw;
             result[code] = {
                 'id': id,
@@ -701,7 +977,7 @@ module.exports = class okex3 extends Exchange {
                     'price': { 'min': undefined, 'max': undefined },
                     'cost': { 'min': undefined, 'max': undefined },
                     'withdraw': {
-                        'min': this.safeFloat (currency, 'min_withdrawal'),
+                        'min': this.safeFloat(currency, 'min_withdrawal'),
                         'max': undefined,
                     },
                 },
@@ -710,18 +986,18 @@ module.exports = class okex3 extends Exchange {
         return result;
     }
 
-    async fetchOrderBook (symbol, limit = undefined, params = {}) {
-        await this.loadMarkets ();
-        const market = this.market (symbol);
+    async fetchOrderBook(symbol, limit = undefined, params = {}) {
+        await this.loadMarkets();
+        const market = this.market(symbol);
         let method = market['type'] + 'GetInstrumentsInstrumentId';
         method += (market['type'] === 'swap') ? 'Depth' : 'Book';
-        let request = {
+        const request = {
             'instrument_id': market.symbol.replace('/', '-'),
         };
         if (limit !== undefined) {
             request['size'] = limit; // max 200
         }
-        let response = await this[method] (this.extend (request, params));
+        const response = await this[method](this.extend(request, params));
         //
         //     {      asks: [ ["0.02685268", "0.242571", "1"],
         //                    ["0.02685493", "0.164085", "1"],
@@ -735,11 +1011,11 @@ module.exports = class okex3 extends Exchange {
         //                    ["0.02634962", "0.264838", "2"]    ],
         //       timestamp:   "2018-12-17T20:24:16.159Z"            }
         //
-        const timestamp = this.parse8601 (this.safeString (response, 'timestamp'));
-        return this.parseOrderBook (response, timestamp);
+        const timestamp = this.parse8601(this.safeString(response, 'timestamp'));
+        return this.parseOrderBook(response, timestamp);
     }
 
-    parseTicker (ticker, market = undefined) {
+    parseTicker(ticker, market = undefined) {
         //
         //     {         best_ask: "0.02665472",
         //               best_bid: "0.02665221",
@@ -755,40 +1031,39 @@ module.exports = class okex3 extends Exchange {
         //              timestamp: "2018-12-17T21:20:07.856Z",
         //       quote_volume_24h: "15094.86831261"            }
         //
-        const timestamp = this.parse8601 (this.safeString (ticker, 'timestamp'));
+        const timestamp = this.parse8601(this.safeString(ticker, 'timestamp'));
         let symbol = undefined;
-        const marketId = this.safeString (ticker, 'instrument_id');
+        const marketId = this.safeString(ticker, 'instrument_id');
         if (marketId in this.markets_by_id) {
             market = this.markets_by_id[marketId];
+            symbol = market['symbol'];
         } else if (marketId !== undefined) {
-            const parts = marketId.split ('-');
+            const parts = marketId.split('-');
             const numParts = parts.length;
             if (numParts === 2) {
-                const [ baseId, quoteId ] = parts;
-                let base = baseId.toUpperCase ();
-                let quote = quoteId.toUpperCase ();
-                base = this.commonCurrencyCode (base);
-                quote = this.commonCurrencyCode (quote);
+                const [baseId, quoteId] = parts;
+                const base = this.safeCurrencyCode(baseId);
+                const quote = this.safeCurrencyCode(quoteId);
                 symbol = base + '/' + quote;
             } else {
                 symbol = marketId;
             }
         }
-        if (market !== undefined) {
+        if ((symbol === undefined) && (market !== undefined)) {
             symbol = market['symbol'];
         }
-        let last = this.safeFloat (ticker, 'last');
-        let open = this.safeFloat (ticker, 'open_24h');
+        const last = this.safeFloat(ticker, 'last');
+        const open = this.safeFloat(ticker, 'open_24h');
         return {
             'symbol': symbol,
             'timestamp': timestamp,
-            'datetime': this.iso8601 (timestamp),
-            'high': this.safeFloat (ticker, 'high_24h'),
-            'low': this.safeFloat (ticker, 'low_24h'),
-            'bid': this.safeFloat (ticker, 'best_bid'),
-            'bidVolume': undefined,
-            'ask': this.safeFloat (ticker, 'best_ask'),
-            'askVolume': undefined,
+            'datetime': this.iso8601(timestamp),
+            'high': this.safeFloat(ticker, 'high_24h'),
+            'low': this.safeFloat(ticker, 'low_24h'),
+            'bid': this.safeFloat(ticker, 'best_bid'),
+            'bidVolume': this.safeFloat(ticker, 'best_bid_size'),
+            'ask': this.safeFloat(ticker, 'best_ask'),
+            'askVolume': this.safeFloat(ticker, 'best_ask_size'),
             'vwap': undefined,
             'open': open,
             'close': last,
@@ -797,20 +1072,20 @@ module.exports = class okex3 extends Exchange {
             'change': undefined,
             'percentage': undefined,
             'average': undefined,
-            'baseVolume': this.safeFloat (ticker, 'base_volume_24h'),
-            'quoteVolume': this.safeFloat (ticker, 'quote_volume_24h'),
+            'baseVolume': this.safeFloat(ticker, 'base_volume_24h'),
+            'quoteVolume': this.safeFloat(ticker, 'quote_volume_24h'),
             'info': ticker,
         };
     }
 
-    async fetchTicker (symbol, params = {}) {
-        await this.loadMarkets ();
-        const market = this.market (symbol);
+    async fetchTicker(symbol, params = {}) {
+        await this.loadMarkets();
+        const market = this.market(symbol);
         const method = market['type'] + 'GetInstrumentsInstrumentIdTicker';
         const request = {
             'instrument_id': market.symbol.replace('/', '-'),
         };
-        const response = await this[method] (this.extend (request, params));
+        const response = await this[method](this.extend(request, params));
         //
         //     {         best_ask: "0.02665472",
         //               best_bid: "0.02665221",
@@ -826,29 +1101,29 @@ module.exports = class okex3 extends Exchange {
         //              timestamp: "2018-12-17T21:20:07.856Z",
         //       quote_volume_24h: "15094.86831261"            }
         //
-        return this.parseTicker (response);
+        return this.parseTicker(response);
     }
 
-    async fetchTickersByType (type, symbols = undefined, params = {}) {
-        await this.loadMarkets ();
+    async fetchTickersByType(type, symbols = undefined, params = {}) {
+        await this.loadMarkets();
         const method = type + 'GetInstrumentsTicker';
-        const response = await this[method] (params);
+        const response = await this[method](params);
         const result = {};
         for (let i = 0; i < response.length; i++) {
-            const ticker = this.parseTicker (response[i]);
+            const ticker = this.parseTicker(response[i]);
             const symbol = ticker['symbol'];
             result[symbol] = ticker;
         }
-        return result;
+        return this.filterByArray(result, 'symbol', symbols);
     }
 
-    async fetchTickers (symbols = undefined, params = {}) {
-        const defaultType = this.safeString2 (this.options, 'fetchTickers', 'defaultType');
-        let type = this.safeString (params, 'type', defaultType);
-        return await this.fetchTickersByType (type, symbols, this.omit (params, 'type'));
+    async fetchTickers(symbols = undefined, params = {}) {
+        const defaultType = this.safeString2(this.options, 'fetchTickers', 'defaultType');
+        const type = this.safeString(params, 'type', defaultType);
+        return await this.fetchTickersByType(type, symbols, this.omit(params, 'type'));
     }
 
-    parseTrade (trade, market = undefined) {
+    parseTrade(trade, market = undefined) {
         //
         // fetchTrades (public)
         //
@@ -909,42 +1184,68 @@ module.exports = class okex3 extends Exchange {
         //         }
         //
         let symbol = undefined;
-        if (market !== undefined) {
+        const marketId = this.safeString(trade, 'instrument_id');
+        let base = undefined;
+        let quote = undefined;
+        if (marketId in this.markets_by_id) {
+            market = this.markets_by_id[marketId];
             symbol = market['symbol'];
+            base = market['base'];
+            quote = market['quote'];
+        } else if (marketId !== undefined) {
+            const parts = marketId.split('-');
+            const numParts = parts.length;
+            if (numParts === 2) {
+                const [baseId, quoteId] = parts;
+                base = this.safeCurrencyCode(baseId);
+                quote = this.safeCurrencyCode(quoteId);
+                symbol = base + '/' + quote;
+            } else {
+                symbol = marketId;
+            }
         }
-        const timestamp = this.parse8601 (this.safeString2 (trade, 'timestamp', 'created_at'));
-        const price = this.safeFloat (trade, 'price');
-        let amount = this.safeFloat2 (trade, 'size', 'qty');
-        amount = this.safeFloat (trade, 'order_qty', amount);
-        let takerOrMaker = this.safeString2 (trade, 'exec_type', 'liquidity');
+        if ((symbol === undefined) && (market !== undefined)) {
+            symbol = market['symbol'];
+            base = market['base'];
+            quote = market['quote'];
+        }
+        const timestamp = this.parse8601(this.safeString2(trade, 'timestamp', 'created_at'));
+        const price = this.safeFloat(trade, 'price');
+        let amount = this.safeFloat2(trade, 'size', 'qty');
+        amount = this.safeFloat(trade, 'order_qty', amount);
+        let takerOrMaker = this.safeString2(trade, 'exec_type', 'liquidity');
         if (takerOrMaker === 'M') {
             takerOrMaker = 'maker';
         } else if (takerOrMaker === 'T') {
             takerOrMaker = 'taker';
         }
-        const side = this.safeString (trade, 'side');
+        const side = this.safeString(trade, 'side');
         let cost = undefined;
         if (amount !== undefined) {
             if (price !== undefined) {
                 cost = amount * price;
             }
         }
-        const feeCost = this.safeFloat (trade, 'fee');
+        const feeCost = this.safeFloat(trade, 'fee');
         let fee = undefined;
         if (feeCost !== undefined) {
-            let feeCurrency = undefined;
+            const feeCurrency = (side === 'buy') ? base : quote;
             fee = {
-                'cost': feeCost,
+                // fee is either a positive number (invitation rebate)
+                // or a negative number (transaction fee deduction)
+                // therefore we need to invert the fee
+                // more about it https://github.com/ccxt/ccxt/issues/5909
+                'cost': -feeCost,
                 'currency': feeCurrency,
             };
         }
-        const orderId = this.safeString (trade, 'order_id');
+        const orderId = this.safeString(trade, 'order_id');
         return {
             'info': trade,
             'timestamp': timestamp,
-            'datetime': this.iso8601 (timestamp),
+            'datetime': this.iso8601(timestamp),
             'symbol': symbol,
-            'id': this.safeString (trade, 'trade_id'),
+            'id': this.safeString2(trade, 'trade_id', 'ledger_id'),
             'order': orderId,
             'type': undefined,
             'takerOrMaker': takerOrMaker,
@@ -956,9 +1257,9 @@ module.exports = class okex3 extends Exchange {
         };
     }
 
-    async fetchTrades (symbol, since = undefined, limit = undefined, params = {}) {
-        await this.loadMarkets ();
-        const market = this.market (symbol);
+    async fetchTrades(symbol, since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets();
+        const market = this.market(symbol);
         const method = market['type'] + 'GetInstrumentsInstrumentIdTrades';
         if ((limit === undefined) || (limit > 100)) {
             limit = 100; // maximum = default = 100
@@ -969,7 +1270,7 @@ module.exports = class okex3 extends Exchange {
             // from: 'id',
             // to: 'id',
         };
-        const response = await this[method] (this.extend (request, params));
+        const response = await this[method](this.extend(request, params));
         //
         // spot markets
         //
@@ -997,10 +1298,10 @@ module.exports = class okex3 extends Exchange {
         //         }
         //     ]
         //
-        return this.parseTrades (response, market, since, limit);
+        return this.parseTrades(response, market, since, limit);
     }
 
-    parseOHLCV (ohlcv, market = undefined, timeframe = '1m', since = undefined, limit = undefined) {
+    parseOHLCV(ohlcv, market = undefined) {
         //
         // spot markets
         //
@@ -1025,86 +1326,106 @@ module.exports = class okex3 extends Exchange {
         //         725179.26172331,
         //     ]
         //
-        if (Array.isArray (ohlcv)) {
-            let numElements = ohlcv.length;
-            let volumeIndex = (numElements > 6) ? 6 : 5;
-            let timestamp = ohlcv[0];
+        if (Array.isArray(ohlcv)) {
+            const numElements = ohlcv.length;
+            const volumeIndex = (numElements > 6) ? 6 : 5;
+            let timestamp = this.safeValue(ohlcv, 0);
             if (typeof timestamp === 'string') {
-                timestamp = this.parse8601 (timestamp);
+                timestamp = this.parse8601(timestamp);
             }
             return [
                 timestamp, // timestamp
-                parseFloat (ohlcv[1]),            // Open
-                parseFloat (ohlcv[2]),            // High
-                parseFloat (ohlcv[3]),            // Low
-                parseFloat (ohlcv[4]),            // Close
-                // parseFloat (ohlcv[5]),         // Quote Volume
-                // parseFloat (ohlcv[6]),         // Base Volume
-                parseFloat (ohlcv[volumeIndex]),  // Volume, okex will return base volume in the 7th element for future markets
+                this.safeFloat(ohlcv, 1),            // Open
+                this.safeFloat(ohlcv, 2),            // High
+                this.safeFloat(ohlcv, 3),            // Low
+                this.safeFloat(ohlcv, 4),            // Close
+                // this.safeFloat (ohlcv, 5),         // Quote Volume
+                // this.safeFloat (ohlcv, 6),         // Base Volume
+                this.safeFloat(ohlcv, volumeIndex),  // Volume, okex will return base volume in the 7th element for future markets
             ];
         } else {
             return [
-                this.parse8601 (this.safeString (ohlcv, 'time')),
-                this.safeFloat (ohlcv, 'open'),    // Open
-                this.safeFloat (ohlcv, 'high'),    // High
-                this.safeFloat (ohlcv, 'low'),     // Low
-                this.safeFloat (ohlcv, 'close'),   // Close
-                this.safeFloat (ohlcv, 'volume'),  // Base Volume
+                this.parse8601(this.safeString(ohlcv, 'time')),
+                this.safeFloat(ohlcv, 'open'),    // Open
+                this.safeFloat(ohlcv, 'high'),    // High
+                this.safeFloat(ohlcv, 'low'),     // Low
+                this.safeFloat(ohlcv, 'close'),   // Close
+                this.safeFloat(ohlcv, 'volume'),  // Base Volume
             ];
         }
     }
 
-    async fetchOHLCV (symbol, timeframe = '1m', since = undefined, limit = undefined, params = {}) {
-        await this.loadMarkets ();
-        let market = this.market (symbol);
+    async fetchOHLCV(symbol, timeframe = '1m', since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets();
+        const market = this.market(symbol);
         const method = market['type'] + 'GetInstrumentsInstrumentIdCandles';
         const request = {
             'instrument_id': market.symbol.replace('/', '-'),
             'granularity': this.timeframes[timeframe],
         };
+        const duration = this.parseTimeframe(timeframe);
         if (since !== undefined) {
-            request['start'] = this.iso8601 (since);
+            if (limit !== undefined) {
+                request['end'] = this.iso8601(this.sum(since, limit * duration * 1000));
+            }
+            request['start'] = this.iso8601(since);
+        } else {
+            const now = this.milliseconds();
+            if (limit !== undefined) {
+                request['start'] = this.iso8601(now - limit * duration * 1000);
+                request['end'] = this.iso8601(now);
+            }
         }
-        const response = await this[method] (this.extend (request, params));
+        const response = await this[method](this.extend(request, params));
         //
         // spot markets
         //
-        //     [ {  close: "0.02683401",
-        //           high: "0.02683401",
-        //            low: "0.02683401",
-        //           open: "0.02683401",
-        //           time: "2018-12-17T23:47:00.000Z",
-        //         volume: "0"                         },
-        //       ...
-        //       {  close: "0.02684545",
-        //           high: "0.02685084",
-        //            low: "0.02683312",
-        //           open: "0.02683894",
-        //           time: "2018-12-17T20:28:00.000Z",
-        //         volume: "101.457222"                }  ]
+        //     [
+        //         {
+        //             close: "0.02683401",
+        //             high: "0.02683401",
+        //             low: "0.02683401",
+        //             open: "0.02683401",
+        //             time: "2018-12-17T23:47:00.000Z",
+        //             volume: "0"
+        //         },
+        //         {
+        //             close: "0.02684545",
+        //             high: "0.02685084",
+        //             low: "0.02683312",
+        //             open: "0.02683894",
+        //             time: "2018-12-17T20:28:00.000Z",
+        //             volume: "101.457222"
+        //         }
+        //     ]
         //
         // futures
         //
-        //     [ [ 1545090660000,
-        //         0.3171,
-        //         0.3174,
-        //         0.3171,
-        //         0.3173,
-        //         1648,
-        //         51930.38579450868 ],
-        //       ...
-        //       [ 1545072720000,
-        //         0.3159,
-        //         0.3161,
-        //         0.3144,
-        //         0.3149,
-        //         22886,
-        //         725179.26172331 ]    ]
+        //     [
+        //         [
+        //             1545090660000,
+        //             0.3171,
+        //             0.3174,
+        //             0.3171,
+        //             0.3173,
+        //             1648,
+        //             51930.38579450868
+        //         ],
+        //         [
+        //             1545072720000,
+        //             0.3159,
+        //             0.3161,
+        //             0.3144,
+        //             0.3149,
+        //             22886,
+        //             725179.26172331
+        //         ]
+        //     ]
         //
-        return this.parseOHLCVs (response, market, timeframe, since, limit);
+        return this.parseOHLCVs(response, market, timeframe, since, limit);
     }
 
-    parseAccountBalance (response) {
+    parseAccountBalance(response) {
         //
         // account
         //
@@ -1149,26 +1470,18 @@ module.exports = class okex3 extends Exchange {
         const result = { 'info': response };
         for (let i = 0; i < response.length; i++) {
             const balance = response[i];
-            const currencyId = this.safeString (balance, 'currency');
-            const code = this.commonCurrencyCode (currencyId);
-            const account = this.account ();
-            const total = this.safeFloat (balance, 'balance');
-            const used = this.safeFloat (balance, 'hold');
-            let free = this.safeFloat (balance, 'available');
-            if (free === undefined) {
-                if ((total !== undefined) && (used !== undefined)) {
-                    free = total - used;
-                }
-            }
-            account['total'] = total;
-            account['used'] = used;
-            account['free'] = free;
+            const currencyId = this.safeString(balance, 'currency');
+            const code = this.safeCurrencyCode(currencyId);
+            const account = this.account();
+            account['total'] = this.safeFloat(balance, 'balance');
+            account['used'] = this.safeFloat(balance, 'hold');
+            account['free'] = this.safeFloat(balance, 'available');
             result[code] = account;
         }
-        return this.parseBalance (result);
+        return this.parseBalance(result);
     }
 
-    parseMarginBalance (response) {
+    parseMarginBalance(response) {
         //
         //     [
         //         {
@@ -1202,55 +1515,50 @@ module.exports = class okex3 extends Exchange {
         const result = { 'info': response };
         for (let i = 0; i < response.length; i++) {
             const balance = response[i];
-            const marketId = this.safeString (balance, 'instrument_id');
-            const market = this.safeValue (this.markets_by_id, marketId);
+            const marketId = this.safeString(balance, 'instrument_id');
+            const market = this.safeValue(this.markets_by_id, marketId);
             let symbol = undefined;
             if (market === undefined) {
-                const [ baseId, quoteId ] = marketId.split ('-');
-                const base = this.commonCurrencyCode (baseId);
-                const quote = this.commonCurrencyCode (quoteId);
+                const [baseId, quoteId] = marketId.split('-');
+                const base = this.safeCurrencyCode(baseId);
+                const quote = this.safeCurrencyCode(quoteId);
                 symbol = base + '/' + quote;
             } else {
                 symbol = market['symbol'];
             }
-            const omittedBalance = this.omit (balance, [
+            const omittedBalance = this.omit(balance, [
                 'instrument_id',
                 'liquidation_price',
                 'product_id',
                 'risk_rate',
+                'margin_ratio',
+                'maint_margin_ratio',
+                'tiers',
             ]);
-            const keys = Object.keys (omittedBalance);
+            const keys = Object.keys(omittedBalance);
             const accounts = {};
             for (let k = 0; k < keys.length; k++) {
                 const key = keys[k];
                 const marketBalance = balance[key];
-                if (key.indexOf (':') >= 0) {
-                    const parts = key.split (':');
+                if (key.indexOf(':') >= 0) {
+                    const parts = key.split(':');
                     const currencyId = parts[1];
-                    const code = this.commonCurrencyCode (currencyId);
-                    const account = this.account ();
-                    const total = this.safeFloat (marketBalance, 'balance');
-                    const used = this.safeFloat (marketBalance, 'hold');
-                    let free = this.safeFloat (marketBalance, 'available');
-                    if (free === undefined) {
-                        if ((total !== undefined) && (used !== undefined)) {
-                            free = total - used;
-                        }
-                    }
-                    account['total'] = total;
-                    account['used'] = used;
-                    account['free'] = free;
+                    const code = this.safeCurrencyCode(currencyId);
+                    const account = this.account();
+                    account['total'] = this.safeFloat(marketBalance, 'balance');
+                    account['used'] = this.safeFloat(marketBalance, 'hold');
+                    account['free'] = this.safeFloat(marketBalance, 'available');
                     accounts[code] = account;
                 } else {
-                    throw new NotSupported (this.id + ' margin balance response format has changed!');
+                    throw new NotSupported(this.id + ' margin balance response format has changed!');
                 }
             }
-            result[symbol] = this.parseBalance (accounts);
+            result[symbol] = this.parseBalance(accounts);
         }
         return result;
     }
 
-    parseFuturesBalance (response) {
+    parseFuturesBalance(response) {
         //
         //     {
         //         "info":{
@@ -1285,30 +1593,22 @@ module.exports = class okex3 extends Exchange {
         //
         // their root field name is "info", so our info will contain their info
         const result = { 'info': response };
-        const info = this.safeValue (response, 'info', {});
-        const lowercaseIds = Object.keys (info);
-        for (let i = 0; i < lowercaseIds.length; i++) {
-            const lowercaseId = lowercaseIds[i];
-            const id = lowercaseId.toUpperCase ();
-            const code = this.commonCurrencyCode (id);
-            const balance = this.safeValue (info, lowercaseId, {});
-            const account = this.account ();
+        const info = this.safeValue(response, 'info', {});
+        const ids = Object.keys(info);
+        for (let i = 0; i < ids.length; i++) {
+            const id = ids[i];
+            const code = this.safeCurrencyCode(id);
+            const balance = this.safeValue(info, id, {});
+            const account = this.account();
             // it may be incorrect to use total, free and used for swap accounts
-            const total = this.safeFloat (balance, 'equity');
-            const free = this.safeFloat (balance, 'total_avail_balance');
-            let used = undefined;
-            if ((total !== undefined) && (free !== undefined)) {
-                used = Math.max (0, total - free);
-            }
-            account['total'] = total;
-            account['used'] = used;
-            account['free'] = free;
+            account['total'] = this.safeFloat(balance, 'equity');
+            account['free'] = this.safeFloat(balance, 'total_avail_balance');
             result[code] = account;
         }
-        return this.parseBalance (result);
+        return this.parseBalance(result);
     }
 
-    parseSwapBalance (response) {
+    parseSwapBalance(response) {
         //
         //     {
         //         "info": [
@@ -1330,40 +1630,34 @@ module.exports = class okex3 extends Exchange {
         //
         // their root field name is "info", so our info will contain their info
         const result = { 'info': response };
-        const info = this.safeValue (response, 'info', {});
-        const lowercaseIds = Object.keys (info);
-        for (let i = 0; i < lowercaseIds.length; i++) {
-            const lowercaseId = lowercaseIds[i];
-            const id = lowercaseId.toUpperCase ();
-            const code = this.commonCurrencyCode (id);
-            const balance = this.safeValue (info, lowercaseId, {});
-            const account = this.account ();
-            // it may be incorrect to use total, free and used for swap accounts
-            const total = this.safeFloat (balance, 'equity');
-            const free = this.safeFloat (balance, 'total_avail_balance');
-            let used = undefined;
-            if ((total !== undefined) && (free !== undefined)) {
-                used = Math.max (0, total - free);
+        const info = this.safeValue(response, 'info', []);
+        for (let i = 0; i < info.length; i++) {
+            const balance = info[i];
+            const marketId = this.safeString(balance, 'instrument_id');
+            let symbol = marketId;
+            if (marketId in this.markets_by_id) {
+                symbol = this.markets_by_id[marketId]['symbol'];
             }
-            account['total'] = total;
-            account['used'] = used;
-            account['free'] = free;
-            result[code] = account;
+            const account = this.account();
+            // it may be incorrect to use total, free and used for swap accounts
+            account['total'] = this.safeFloat(balance, 'equity');
+            account['free'] = this.safeFloat(balance, 'total_avail_balance');
+            result[symbol] = account;
         }
-        return this.parseBalance (result);
+        return this.parseBalance(result);
     }
 
-    async fetchBalance (params = {}) {
-        await this.loadMarkets ();
-        const defaultType = this.safeString2 (this.options, 'fetchBalance', 'defaultType');
-        const type = this.safeString (params, 'type', defaultType);
+    async fetchBalance(params = {}) {
+        const defaultType = this.safeString2(this.options, 'fetchBalance', 'defaultType');
+        const type = this.safeString(params, 'type', defaultType);
         if (type === undefined) {
-            throw new ArgumentsRequired (this.id + " fetchBalance requires a type parameter (one of 'account', 'spot', 'margin', 'futures', 'swap').");
+            throw new ArgumentsRequired(this.id + " fetchBalance requires a type parameter (one of 'account', 'spot', 'margin', 'futures', 'swap')");
         }
+        await this.loadMarkets();
         const suffix = (type === 'account') ? 'Wallet' : 'Accounts';
         const method = type + 'Get' + suffix;
-        const query = this.omit (params, 'type');
-        const response = await this[method] (query);
+        const query = this.omit(params, 'type');
+        const response = await this[method](query);
         //
         // account
         //
@@ -1489,32 +1783,42 @@ module.exports = class okex3 extends Exchange {
         //         ]
         //     }
         //
-        if ((type === 'account') || (type === 'spot')) {
-            return this.parseAccountBalance (response);
-        } else if (type === 'margin') {
-            return this.parseMarginBalance (response);
-        } else if (type === 'futures') {
-            return this.parseFuturesBalance (response);
-        } else if (type === 'swap') {
-            return this.parseSwapBalance (response);
-        }
-        throw new NotSupported (this.id + " fetchBalance does not support the '" + type + "' type (the type must be one of 'account', 'spot', 'margin', 'futures', 'swap')");
+        return this.parseBalanceByType(type, response);
     }
 
-    async createOrder (symbol, type, side, amount, price = undefined, params = {}) {
-        await this.loadMarkets ();
-        const market = this.market (symbol);
+    parseBalanceByType(type, response) {
+        if ((type === 'account') || (type === 'spot')) {
+            return this.parseAccountBalance(response);
+        } else if (type === 'margin') {
+            return this.parseMarginBalance(response);
+        } else if (type === 'futures') {
+            return this.parseFuturesBalance(response);
+        } else if (type === 'swap') {
+            return this.parseSwapBalance(response);
+        }
+        throw new NotSupported(this.id + " fetchBalance does not support the '" + type + "' type (the type must be one of 'account', 'spot', 'margin', 'futures', 'swap')");
+    }
+
+    async createOrder(symbol, type, side, amount, price = undefined, params = {}) {
+        await this.loadMarkets();
+        const market = this.market(symbol);
         let request = {
             'instrument_id': market.symbol.replace('/', '-'),
             // 'client_oid': 'abcdef1234567890', // [a-z0-9]{1,32}
             // 'order_type': '0', // 0: Normal limit order (Unfilled and 0 represent normal limit order) 1: Post only 2: Fill Or Kill 3: Immediatel Or Cancel
         };
+        const clientOrderId = this.safeString2(params, 'client_oid', 'clientOrderId');
+        if (clientOrderId !== undefined) {
+            request['client_oid'] = clientOrderId;
+            params = this.omit(params, ['client_oid', 'clientOrderId']);
+        }
         let method = undefined;
         if (market['futures'] || market['swap']) {
-            request = this.extend (request, {
+            const size = market['futures'] ? this.numberToString(amount) : this.amountToPrecision(symbol, amount);
+            request = this.extend(request, {
                 'type': type, // 1:open long 2:open short 3:close long 4:close short for futures
-                'side': this.amountToPrecision (symbol, amount),
-                'price': this.priceToPrecision (symbol, price),
+                'size': size,
+                'price': this.priceToPrecision(symbol, price),
                 // 'match_price': '0', // Order at best counter party price? (0:no 1:yes). The default is 0. If it is set as 1, the price parameter will be ignored. When posting orders at best bid price, order_type can only be 0 (regular order).
             });
             if (market['futures']) {
@@ -1522,37 +1826,48 @@ module.exports = class okex3 extends Exchange {
             }
             method = market['type'] + 'PostOrder';
         } else {
-            const marginTrading = this.safeString (params, 'margin_trading', '1');  // 1 = spot, 2 = margin
-            request = this.extend (request, {
+            const marginTrading = this.safeString(params, 'margin_trading', '1');  // 1 = spot, 2 = margin
+            request = this.extend(request, {
                 'side': side,
                 'type': type, // limit/market
                 'margin_trading': marginTrading, // 1 = spot, 2 = margin
             });
-            if (type === 'limit') {
-                request['price'] = this.priceToPrecision (symbol, price);
-                request['size'] = this.amountToPrecision (symbol, amount);
+            if (type === 'limit' || type == "stop_limit") {
+                request['price'] = this.priceToPrecision(symbol, price);
+                request['size'] = this.amountToPrecision(symbol, amount);
             } else if (type === 'market') {
                 // for market buy it requires the amount of quote currency to spend
                 if (side === 'buy') {
-                    let notional = this.safeFloat (params, 'notional');
-                    const createMarketBuyOrderRequiresPrice = this.safeValue (this.options, 'createMarketBuyOrderRequiresPrice', true);
+                    let notional = this.safeFloat(params, 'notional');
+                    const createMarketBuyOrderRequiresPrice = this.safeValue(this.options, 'createMarketBuyOrderRequiresPrice', true);
                     if (createMarketBuyOrderRequiresPrice) {
                         if (price !== undefined) {
                             if (notional === undefined) {
                                 notional = amount * price;
                             }
                         } else if (notional === undefined) {
-                            throw new InvalidOrder (this.id + " createOrder() requires the price argument with market buy orders to calculate total order cost (amount to spend), where cost = amount * price. Supply a price argument to createOrder() call if you want the cost to be calculated for you from price and amount, or, alternatively, add .options['createMarketBuyOrderRequiresPrice'] = false and supply the total cost value in the 'notional' extra parameter (the exchange-specific behaviour)");
+                            throw new InvalidOrder(this.id + " createOrder() requires the price argument with market buy orders to calculate total order cost (amount to spend), where cost = amount * price. Supply a price argument to createOrder() call if you want the cost to be calculated for you from price and amount, or, alternatively, add .options['createMarketBuyOrderRequiresPrice'] = false and supply the total cost value in the 'amount' argument or in the 'notional' extra parameter (the exchange-specific behaviour)");
                         }
+                    } else {
+                        notional = (notional === undefined) ? amount : notional;
                     }
-                    request['notional'] = this.costToPrecision (symbol, notional);
+                    const precision = market['precision']['price'];
+                    request['notional'] = this.decimalToPrecision(notional, TRUNCATE, precision, this.precisionMode);
                 } else {
-                    request['size'] = this.amountToPrecision (symbol, amount);
+                    request['size'] = this.amountToPrecision(symbol, amount);
                 }
             }
             method = (marginTrading === '2') ? 'marginPostOrders' : 'spotPostOrders';
         }
-        const response = await this[method] (this.extend (request, params));
+        if (type == 'stop_limit') {
+            request['order_type'] = 1; // trigger order
+            request['mode'] = 1; // spot order
+            request['algo_type'] = 1; // stop limit 
+            request['trigger_price'] = params.stopPrice;
+            request['algo_price'] = price;
+            method = 'spotPostOrderAlgo'
+        }
+        const response = await this[method](this.extend(request, params));
         //
         //     {
         //         "client_oid":"oktspot79",
@@ -1562,38 +1877,19 @@ module.exports = class okex3 extends Exchange {
         //         "result":true
         //     }
         //
-        const timestamp = this.milliseconds ();
-        const id = this.safeString (response, 'order_id');
-        return {
-            'info': response,
-            'id': id,
-            'timestamp': timestamp,
-            'datetime': this.iso8601 (timestamp),
-            'lastTradeTimestamp': undefined,
-            'status': undefined,
-            'symbol': symbol,
-            'type': type,
-            'side': side,
-            'price': price,
-            'amount': amount,
-            'filled': undefined,
-            'remaining': undefined,
-            'cost': undefined,
-            'trades': undefined,
-            'fee': undefined,
-        };
+        return this.parseOrder(response, market);
     }
 
-    async cancelOrder (id, symbol = undefined, params = {}) {
+    async cancelOrder(id, symbol = undefined, params = {}) {
         if (symbol === undefined) {
-            throw new ArgumentsRequired (this.id + ' cancelOrder() requires a symbol argument');
+            throw new ArgumentsRequired(this.id + ' cancelOrder() requires a symbol argument');
         }
-        await this.loadMarkets ();
-        const market = this.market (symbol);
-        const defaultType = this.safeString2 (this.options, 'cancelOrder', 'defaultType');
-        const type = this.safeString (params, 'type', defaultType);
+        await this.loadMarkets();
+        const market = this.market(symbol);
+        const defaultType = this.safeString2(this.options, 'cancelOrder', 'defaultType', market['type']);
+        const type = this.safeString(params, 'type', defaultType);
         if (type === undefined) {
-            throw new ArgumentsRequired (this.id + " cancelOrder requires a type parameter (one of 'spot', 'margin', 'futures', 'swap').");
+            throw new ArgumentsRequired(this.id + " cancelOrder requires a type parameter (one of 'spot', 'margin', 'futures', 'swap').");
         }
         let method = type + 'PostCancelOrder';
         const request = {
@@ -1604,17 +1900,17 @@ module.exports = class okex3 extends Exchange {
         } else {
             method += 's';
         }
-        const clientOid = this.safeString (params, 'client_oid');
-        if (clientOid !== undefined) {
+        const clientOrderId = this.safeString2(params, 'client_oid', 'clientOrderId');
+        if (clientOrderId !== undefined) {
             method += 'ClientOid';
-            request['client_oid'] = clientOid;
+            request['client_oid'] = clientOrderId;
         } else {
             method += 'OrderId';
             request['order_id'] = id;
         }
-        const query = this.omit (params, 'type');
-        const response = await this[method] (this.extend (request, query));
-        const result = ('result' in response) ? response : this.safeValue (response, market.symbol.replace('/', '-'), {});
+        const query = this.omit(params, ['type', 'client_oid', 'clientOrderId']);
+        const response = await this[method](this.extend(request, query));
+        const result = ('result' in response) ? response : this.safeValue(response, market.symbol.replace('/', '-'), {});
         //
         // spot, margin
         //
@@ -1637,10 +1933,10 @@ module.exports = class okex3 extends Exchange {
         //         "instrument_id": "EOS-USD-190628"
         //     }
         //
-        return this.parseOrder (result, market);
+        return this.parseOrder(result, market);
     }
 
-    parseOrderStatus (status) {
+    parseOrderStatus(status) {
         const statuses = {
             '-2': 'failed',
             '-1': 'canceled',
@@ -1650,20 +1946,20 @@ module.exports = class okex3 extends Exchange {
             '3': 'open',
             '4': 'canceled',
         };
-        return this.safeString (statuses, status, status);
+        return this.safeString(statuses, status, status);
     }
 
-    parseOrderSide (side) {
+    parseOrderSide(side) {
         const sides = {
             '1': 'buy', // open long
             '2': 'sell', // open short
             '3': 'sell', // close long
             '4': 'buy', // close short
         };
-        return this.safeString (sides, side, side);
+        return this.safeString(sides, side, side);
     }
 
-    parseOrder (order, market = undefined) {
+    parseOrder(order, market = undefined) {
         //
         // createOrder
         //
@@ -1731,12 +2027,12 @@ module.exports = class okex3 extends Exchange {
         //         "order_type":"0"
         //     }
         //
-        const id = this.safeString (order, 'order_id');
-        const timestamp = this.parse8601 (this.safeString (order, 'timestamp'));
-        let side = this.safeString (order, 'side');
-        let type = this.safeString (order, 'type');
+        const id = this.safeString(order, 'order_id');
+        const timestamp = this.parse8601(this.safeString(order, 'timestamp'));
+        let side = this.safeString(order, 'side');
+        let type = this.safeString(order, 'type');
         if ((side !== 'buy') && (side !== 'sell')) {
-            side = this.parseOrderSide (type);
+            side = this.parseOrderSide(type);
         }
         if ((type !== 'limit') && (type !== 'market')) {
             if ('pnl' in order) {
@@ -1746,7 +2042,7 @@ module.exports = class okex3 extends Exchange {
             }
         }
         let symbol = undefined;
-        const marketId = this.safeString (order, 'instrument_id');
+        const marketId = this.safeString(order, 'instrument_id');
         if (marketId in this.markets_by_id) {
             market = this.markets_by_id[marketId];
             symbol = market['symbol'];
@@ -1758,21 +2054,21 @@ module.exports = class okex3 extends Exchange {
                 symbol = market['symbol'];
             }
         }
-        let amount = this.safeFloat (order, 'size');
-        let filled = this.safeFloat2 (order, 'filled_size', 'filled_qty');
+        let amount = this.safeFloat(order, 'size');
+        const filled = this.safeFloat2(order, 'filled_size', 'filled_qty');
         let remaining = undefined;
         if (amount !== undefined) {
             if (filled !== undefined) {
-                amount = Math.max (amount, filled);
-                remaining = Math.max (0, amount - filled);
+                amount = Math.max(amount, filled);
+                remaining = Math.max(0, amount - filled);
             }
         }
         if (type === 'market') {
             remaining = 0;
         }
-        let cost = this.safeFloat2 (order, 'filled_notional', 'funds');
-        const price = this.safeFloat (order, 'price');
-        let average = this.safeFloat (order, 'price_avg');
+        let cost = this.safeFloat2(order, 'filled_notional', 'funds');
+        const price = this.safeFloat(order, 'price');
+        let average = this.safeFloat(order, 'price_avg');
         if (cost === undefined) {
             if (filled !== undefined && average !== undefined) {
                 cost = average * filled;
@@ -1782,21 +2078,23 @@ module.exports = class okex3 extends Exchange {
                 average = cost / filled;
             }
         }
-        const status = this.parseOrderStatus (this.safeString (order, 'state'));
-        const feeCost = this.safeFloat (order, 'fee');
+        const status = this.parseOrderStatus(this.safeString(order, 'state'));
+        const feeCost = this.safeFloat(order, 'fee');
         let fee = undefined;
         if (feeCost !== undefined) {
-            let feeCurrency = undefined;
+            const feeCurrency = undefined;
             fee = {
                 'cost': feeCost,
                 'currency': feeCurrency,
             };
         }
+        const clientOrderId = this.safeString(order, 'client_oid');
         return {
             'info': order,
             'id': id,
+            'clientOrderId': clientOrderId,
             'timestamp': timestamp,
-            'datetime': this.iso8601 (timestamp),
+            'datetime': this.iso8601(timestamp),
             'lastTradeTimestamp': undefined,
             'symbol': symbol,
             'type': type,
@@ -1809,20 +2107,21 @@ module.exports = class okex3 extends Exchange {
             'remaining': remaining,
             'status': status,
             'fee': fee,
+            'trades': undefined,
         };
     }
 
-    async fetchOrder (id, symbol = undefined, params = {}) {
+    async fetchOrder(id, symbol = undefined, params = {}) {
         if (symbol === undefined) {
-            throw new ArgumentsRequired (this.id + ' fetchOrder requires a symbol argument');
+            throw new ArgumentsRequired(this.id + ' fetchOrder requires a symbol argument');
         }
-        const defaultType = this.safeString2 (this.options, 'fetchOrder', 'defaultType');
-        const type = this.safeString (params, 'type', defaultType);
+        await this.loadMarkets();
+        const market = this.market(symbol);
+        const defaultType = this.safeString2(this.options, 'fetchOrder', 'defaultType', market['type']);
+        const type = this.safeString(params, 'type', defaultType);
         if (type === undefined) {
-            throw new ArgumentsRequired (this.id + " fetchOrder requires a type parameter (one of 'spot', 'margin', 'futures', 'swap').");
+            throw new ArgumentsRequired(this.id + " fetchOrder requires a type parameter (one of 'spot', 'margin', 'futures', 'swap').");
         }
-        await this.loadMarkets ();
-        const market = this.market (symbol);
         const instrumentId = (market['futures'] || market['swap']) ? 'InstrumentId' : '';
         let method = type + 'GetOrders' + instrumentId;
         const request = {
@@ -1830,7 +2129,7 @@ module.exports = class okex3 extends Exchange {
             // 'client_oid': 'abcdef12345', // optional, [a-z0-9]{1,32}
             // 'order_id': id,
         };
-        const clientOid = this.safeString (params, 'client_oid');
+        const clientOid = this.safeString(params, 'client_oid');
         if (clientOid !== undefined) {
             method += 'ClientOid';
             request['client_oid'] = clientOid;
@@ -1838,8 +2137,8 @@ module.exports = class okex3 extends Exchange {
             method += 'OrderId';
             request['order_id'] = id;
         }
-        const query = this.omit (params, 'type');
-        const response = await this[method] (this.extend (request, query));
+        const query = this.omit(params, 'type');
+        const response = await this[method](this.extend(request, query));
         //
         // spot, margin
         //
@@ -1884,39 +2183,39 @@ module.exports = class okex3 extends Exchange {
         //         "order_type":"0"
         //     }
         //
-        return this.parseOrder (response);
+        return this.parseOrder(response);
     }
 
-    async fetchOrdersByState (state, symbol = undefined, since = undefined, limit = undefined, params = {}) {
+    async fetchOrdersByState(state, symbol = undefined, since = undefined, limit = undefined, params = {}) {
         if (symbol === undefined) {
-            throw new ArgumentsRequired (this.id + ' fetchOrdersByState requires a symbol argument');
+            throw new ArgumentsRequired(this.id + ' fetchOrdersByState requires a symbol argument');
         }
-        const defaultType = this.safeString2 (this.options, 'fetchOrdersByState', 'defaultType');
-        const type = this.safeString (params, 'type', defaultType);
+        await this.loadMarkets();
+        const market = this.market(symbol);
+        const defaultType = this.safeString2(this.options, 'fetchOrder', 'defaultType', market['type']);
+        const type = this.safeString(params, 'type', defaultType);
         if (type === undefined) {
-            throw new ArgumentsRequired (this.id + " fetchOrdersByState requires a type parameter (one of 'spot', 'margin', 'futures', 'swap').");
+            throw new ArgumentsRequired(this.id + " fetchOrder requires a type parameter (one of 'spot', 'margin', 'futures', 'swap').");
         }
-        await this.loadMarkets ();
-        const market = this.market (symbol);
-        // '-2': failed,
-        // '-1': cancelled,
-        //  '0': open ,
-        //  '1': partially filled,
-        //  '2': fully filled,
-        //  '3': submitting,
-        //  '4': cancelling,
-        //  '6': incomplete（open+partially filled),
-        //  '7': complete（cancelled+fully filled),
         const request = {
             'instrument_id': market.symbol.replace('/', '-'),
+            // '-2': failed,
+            // '-1': cancelled,
+            //  '0': open ,
+            //  '1': partially filled,
+            //  '2': fully filled,
+            //  '3': submitting,
+            //  '4': cancelling,
+            //  '6': incomplete（open+partially filled),
+            //  '7': complete（cancelled+fully filled),
             'state': state,
         };
         let method = type + 'GetOrders';
         if (market['futures'] || market['swap']) {
             method += 'InstrumentId';
         }
-        const query = this.omit (params, 'type');
-        const response = await this[method] (this.extend (request, query));
+        const query = this.omit(params, 'type');
+        const response = await this[method](this.extend(request, query));
         //
         // spot, margin
         //
@@ -1979,7 +2278,7 @@ module.exports = class okex3 extends Exchange {
         //
         let orders = undefined;
         if (market['type'] === 'swap' || market['type'] === 'futures') {
-            orders = this.safeValue (response, 'order_info', []);
+            orders = this.safeValue(response, 'order_info', []);
         } else {
             orders = response;
             const responseLength = response.length;
@@ -1990,16 +2289,16 @@ module.exports = class okex3 extends Exchange {
             // to their actual API response for spot markets
             // OKEX v3 API returns a plain array of orders
             if (responseLength > 1) {
-                const before = this.safeValue (response[1], 'before');
+                const before = this.safeValue(response[1], 'before');
                 if (before !== undefined) {
                     orders = response[0];
                 }
             }
         }
-        return this.parseOrders (orders, market, since, limit);
+        return this.parseOrders(orders, market, since, limit);
     }
 
-    async fetchOpenOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
+    async fetchOpenOrders(symbol = undefined, since = undefined, limit = undefined, params = {}) {
         // '-2': failed,
         // '-1': cancelled,
         //  '0': open ,
@@ -2009,10 +2308,10 @@ module.exports = class okex3 extends Exchange {
         //  '4': cancelling,
         //  '6': incomplete（open+partially filled),
         //  '7': complete（cancelled+fully filled),
-        return await this.fetchOrdersByState ('6', symbol, since, limit, params);
+        return await this.fetchOrdersByState('6', symbol, since, limit, params);
     }
 
-    async fetchClosedOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
+    async fetchClosedOrders(symbol = undefined, since = undefined, limit = undefined, params = {}) {
         // '-2': failed,
         // '-1': cancelled,
         //  '0': open ,
@@ -2022,18 +2321,20 @@ module.exports = class okex3 extends Exchange {
         //  '4': cancelling,
         //  '6': incomplete（open+partially filled),
         //  '7': complete（cancelled+fully filled),
-        return await this.fetchOrdersByState ('7', symbol, since, limit, params);
+        return await this.fetchOrdersByState('7', symbol, since, limit, params);
     }
 
-    parseDepositAddresses (addresses) {
-        const result = [];
+    parseDepositAddresses(addresses) {
+        const result = {};
         for (let i = 0; i < addresses.length; i++) {
-            result.push (this.parseDepositAddress (addresses[i]));
+            const address = this.parseDepositAddress(addresses[i]);
+            const code = address['currency'];
+            result[code] = address;
         }
         return result;
     }
 
-    parseDepositAddress (depositAddress, currency = undefined) {
+    parseDepositAddress(depositAddress, currency = undefined) {
         //
         //     {
         //         address: '0x696abb81974a8793352cbd33aadcf78eda3cfdfa',
@@ -2044,14 +2345,12 @@ module.exports = class okex3 extends Exchange {
         //         // can_withdraw: 1, // 0 or 1, documented but missing
         //     }
         //
-        const address = this.safeString (depositAddress, 'address');
-        const tag = this.safeString2 (depositAddress, 'tag', 'payment_id');
-        let currencyId = this.safeString (depositAddress, 'currency');
-        let code = undefined;
-        if (currencyId !== undefined) {
-            code = this.commonCurrencyCode (currencyId.toUpperCase ());
-        }
-        this.checkAddress (address);
+        const address = this.safeString(depositAddress, 'address');
+        let tag = this.safeString2(depositAddress, 'tag', 'payment_id');
+        tag = this.safeString(depositAddress, 'memo', tag);
+        const currencyId = this.safeString(depositAddress, 'currency');
+        const code = this.safeCurrencyCode(currencyId);
+        this.checkAddress(address);
         return {
             'currency': code,
             'address': address,
@@ -2060,13 +2359,13 @@ module.exports = class okex3 extends Exchange {
         };
     }
 
-    async fetchDepositAddress (code, params = {}) {
-        await this.loadMarkets ();
-        const currency = this.currency (code);
+    async fetchDepositAddress(code, params = {}) {
+        await this.loadMarkets();
+        const currency = this.currency(code);
         const request = {
             'currency': currency['id'],
         };
-        const response = await this.accountGetDepositAddress (this.extend (request, params));
+        const response = await this.accountGetDepositAddress(this.extend(request, params));
         //
         //     [
         //         {
@@ -2075,44 +2374,44 @@ module.exports = class okex3 extends Exchange {
         //         }
         //     ]
         //
-        const addresses = this.parseDepositAddresses (response);
-        const numAddresses = addresses.length;
-        if (numAddresses < 1) {
-            throw new InvalidAddress (this.id + ' fetchDepositAddress cannot return nonexistent addresses, you should create withdrawal addresses with the exchange website first');
+        const addresses = this.parseDepositAddresses(response);
+        const address = this.safeValue(addresses, code);
+        if (address === undefined) {
+            throw new InvalidAddress(this.id + ' fetchDepositAddress cannot return nonexistent addresses, you should create withdrawal addresses with the exchange website first');
         }
-        return addresses[0];
+        return address;
     }
 
-    async withdraw (code, amount, address, tag = undefined, params = {}) {
-        this.checkAddress (address);
-        await this.loadMarkets ();
-        const currency = this.currency (code);
+    async withdraw(code, amount, address, tag = undefined, params = {}) {
+        this.checkAddress(address);
+        await this.loadMarkets();
+        const currency = this.currency(code);
         if (tag) {
             address = address + ':' + tag;
         }
-        const fee = this.safeString (params, 'fee');
+        const fee = this.safeString(params, 'fee');
         if (fee === undefined) {
-            throw new ExchangeError (this.id + " withdraw() requires a `fee` string parameter, network transaction fee must be ≥ 0. Withdrawals to OKCoin or OKEx are fee-free, please set '0'. Withdrawing to external digital asset address requires network transaction fee.");
+            throw new ArgumentsRequired(this.id + " withdraw() requires a `fee` string parameter, network transaction fee must be ≥ 0. Withdrawals to OKCoin or OKEx are fee-free, please set '0'. Withdrawing to external digital asset address requires network transaction fee.");
         }
         const request = {
             'currency': currency['id'],
             'to_address': address,
             'destination': '4', // 2 = OKCoin International, 3 = OKEx 4 = others
-            'amount': this.numberToString (amount),
+            'amount': this.numberToString(amount),
             'fee': fee, // String. Network transaction fee ≥ 0. Withdrawals to OKCoin or OKEx are fee-free, please set as 0. Withdrawal to external digital asset address requires network transaction fee.
         };
-        if (this.password) {
-            request['trade_pwd'] = this.password;
-        } else if ('password' in params) {
+        if ('password' in params) {
             request['trade_pwd'] = params['password'];
         } else if ('trade_pwd' in params) {
             request['trade_pwd'] = params['trade_pwd'];
+        } else if (this.password) {
+            request['trade_pwd'] = this.password;
         }
-        const query = this.omit (params, [ 'fee', 'password', 'trade_pwd' ]);
+        const query = this.omit(params, ['fee', 'password', 'trade_pwd']);
         if (!('trade_pwd' in request)) {
-            throw new ExchangeError (this.id + ' withdraw() requires this.password set on the exchange instance or a password / trade_pwd parameter');
+            throw new ExchangeError(this.id + ' withdraw() requires this.password set on the exchange instance or a password / trade_pwd parameter');
         }
-        const response = await this.accountPostWithdrawal (this.extend (request, query));
+        const response = await this.accountPostWithdrawal(this.extend(request, query));
         //
         //     {
         //         "amount":"0.1",
@@ -2123,39 +2422,39 @@ module.exports = class okex3 extends Exchange {
         //
         return {
             'info': response,
-            'id': this.safeString (response, 'withdraw_id'),
+            'id': this.safeString(response, 'withdrawal_id'),
         };
     }
 
-    async fetchDeposits (code = undefined, since = undefined, limit = undefined, params = {}) {
-        await this.loadMarkets ();
+    async fetchDeposits(code = undefined, since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets();
         const request = {};
         let method = 'accountGetDepositHistory';
         let currency = undefined;
         if (code !== undefined) {
-            currency = this.currency (code);
+            currency = this.currency(code);
             request['code'] = currency['code'];
             method += 'Currency';
         }
-        const response = await this[method] (this.extend (request, params));
-        return this.parseTransactions (response, currency, since, limit, params);
+        const response = await this[method](this.extend(request, params));
+        return this.parseTransactions(response, currency, since, limit, params);
     }
 
-    async fetchWithdrawals (code = undefined, since = undefined, limit = undefined, params = {}) {
-        await this.loadMarkets ();
+    async fetchWithdrawals(code = undefined, since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets();
         const request = {};
         let method = 'accountGetWithdrawalHistory';
         let currency = undefined;
         if (code !== undefined) {
-            currency = this.currency (code);
+            currency = this.currency(code);
             request['code'] = currency['code'];
             method += 'Currency';
         }
-        const response = await this[method] (this.extend (request, params));
-        return this.parseTransactions (response, currency, since, limit, params);
+        const response = await this[method](this.extend(request, params));
+        return this.parseTransactions(response, currency, since, limit, params);
     }
 
-    parseTransactionStatus (status) {
+    parseTransactionStatus(status) {
         //
         // deposit statuses
         //
@@ -2190,10 +2489,10 @@ module.exports = class okex3 extends Exchange {
             '4': 'pending',
             '5': 'pending',
         };
-        return this.safeString (statuses, status, status);
+        return this.safeString(statuses, status, status);
     }
 
-    parseTransaction (transaction, currency = undefined) {
+    parseTransaction(transaction, currency = undefined) {
         //
         // withdraw
         //
@@ -2221,40 +2520,51 @@ module.exports = class okex3 extends Exchange {
         // fetchDeposits
         //
         //     {
-        //         amount: "0.47847546",
-        //         txid: "1723573_3_0_0_WALLET",
-        //         currency: "BTC",
-        //         to: "",
-        //         timestamp: "2018-08-16T03:41:10.000Z",
-        //         status: "2"
+        //         "amount": "4.19511659",
+        //         "txid": "14c9a8c925647cdb7e5b2937ea9aefe2b29b2c273150ad3f44b3b8a4635ed437",
+        //         "currency": "XMR",
+        //         "from": "",
+        //         "to": "48PjH3ksv1fiXniKvKvyH5UtFs5WhfS2Vf7U3TwzdRJtCc7HJWvCQe56dRahyhQyTAViXZ8Nzk4gQg6o4BJBMUoxNy8y8g7",
+        //         "deposit_id": 11571659, <-- we can use this
+        //         "timestamp": "2019-10-01T14:54:19.000Z",
+        //         "status": "2"
         //     }
         //
         let type = undefined;
         let id = undefined;
         let address = undefined;
-        const withdrawalId = this.safeString (transaction, 'withdrawal_id');
-        const addressFrom = this.safeString (transaction, 'from');
-        const addressTo = this.safeString (transaction, 'to');
+        const withdrawalId = this.safeString(transaction, 'withdrawal_id');
+        const addressFrom = this.safeString(transaction, 'from');
+        const addressTo = this.safeString(transaction, 'to');
         if (withdrawalId !== undefined) {
             type = 'withdrawal';
             id = withdrawalId;
             address = addressTo;
         } else {
+            // the payment_id will appear on new deposits but appears to be removed from the response after 2 months
+            id = this.safeString2(transaction, 'payment_id', 'deposit_id');
             type = 'deposit';
-            address = addressFrom;
+            address = addressTo;
         }
-        let currencyId = this.safeString (transaction, 'currency');
-        if (currencyId !== undefined) {
-            currencyId = currencyId.toUpperCase ();
-        }
-        const code = this.commonCurrencyCode (currencyId);
-        const amount = this.safeFloat (transaction, 'amount');
-        const status = this.parseTransactionStatus (this.safeString (transaction, 'status'));
-        const txid = this.safeString (transaction, 'txid');
-        const timestamp = this.parse8601 (this.safeString (transaction, 'timestamp'));
-        let feeCost = this.safeFloat (transaction, 'fee');
+        const currencyId = this.safeString(transaction, 'currency');
+        const code = this.safeCurrencyCode(currencyId);
+        const amount = this.safeFloat(transaction, 'amount');
+        const status = this.parseTransactionStatus(this.safeString(transaction, 'status'));
+        const txid = this.safeString(transaction, 'txid');
+        const timestamp = this.parse8601(this.safeString(transaction, 'timestamp'));
+        let feeCost = undefined;
         if (type === 'deposit') {
             feeCost = 0;
+        } else {
+            if (currencyId !== undefined) {
+                const feeWithCurrencyId = this.safeString(transaction, 'fee');
+                if (feeWithCurrencyId !== undefined) {
+                    // https://github.com/ccxt/ccxt/pull/5748
+                    const lowercaseCurrencyId = currencyId.toLowerCase();
+                    const feeWithoutCurrencyId = feeWithCurrencyId.replace(lowercaseCurrencyId, '');
+                    feeCost = parseFloat(feeWithoutCurrencyId);
+                }
+            }
         }
         // todo parse tags
         return {
@@ -2265,13 +2575,15 @@ module.exports = class okex3 extends Exchange {
             'addressFrom': addressFrom,
             'addressTo': addressTo,
             'address': address,
+            'tagFrom': undefined,
+            'tagTo': undefined,
             'tag': undefined,
             'status': status,
             'type': type,
             'updated': undefined,
             'txid': txid,
             'timestamp': timestamp,
-            'datetime': this.iso8601 (timestamp),
+            'datetime': this.iso8601(timestamp),
             'fee': {
                 'currency': code,
                 'cost': feeCost,
@@ -2279,88 +2591,257 @@ module.exports = class okex3 extends Exchange {
         };
     }
 
-    async fetchOrderTrades (id, symbol = undefined, since = undefined, limit = undefined, params = {}) {
-        if (symbol === undefined) {
-            throw new ArgumentsRequired (this.id + ' fetchOrderTrades requires a symbol argument');
+    parseMyTrade(pair, market = undefined) {
+        // check that trading symbols match in both entries
+        const first = pair[0];
+        const second = pair[1];
+        const firstMarketId = this.safeString(first, 'instrument_id');
+        const secondMarketId = this.safeString(second, 'instrument_id');
+        if (firstMarketId !== secondMarketId) {
+            throw new NotSupported(this.id + ' parseMyTrade() received unrecognized response format, differing instrument_ids in one fill, the exchange API might have changed, paste your verbose output: https://github.com/ccxt/ccxt/wiki/FAQ#what-is-required-to-get-help');
         }
-        await this.loadMarkets ();
-        const market = this.market (symbol);
-        if ((limit === undefined) || (limit > 100)) {
+        const marketId = firstMarketId;
+        // determine the base and quote
+        let quoteId = undefined;
+        let symbol = undefined;
+        if (marketId in this.markets_by_id) {
+            market = this.markets_by_id[marketId];
+            quoteId = market['quoteId'];
+            symbol = market['symbol'];
+        } else {
+            const parts = marketId.split('-');
+            quoteId = this.safeString(parts, 1);
+            symbol = marketId;
+        }
+        const id = this.safeString(first, 'trade_id');
+        const price = this.safeFloat(first, 'price');
+        // determine buy/sell side and amounts
+        // get the side from either the first trade or the second trade
+        let feeCost = this.safeFloat(first, 'fee');
+        const index = (feeCost !== 0) ? 0 : 1;
+        const userTrade = this.safeValue(pair, index);
+        const otherTrade = this.safeValue(pair, 1 - index);
+        const receivedCurrencyId = this.safeString(userTrade, 'currency');
+        let side = undefined;
+        let amount = undefined;
+        let cost = undefined;
+        if (receivedCurrencyId === quoteId) {
+            side = 'sell';
+            amount = this.safeFloat(otherTrade, 'size');
+            cost = this.safeFloat(userTrade, 'size');
+        } else {
+            side = 'buy';
+            amount = this.safeFloat(userTrade, 'size');
+            cost = this.safeFloat(otherTrade, 'size');
+        }
+        feeCost = (feeCost !== 0) ? feeCost : this.safeFloat(second, 'fee');
+        const trade = this.safeValue(pair, index);
+        //
+        // simplified structures to show the underlying semantics
+        //
+        //     // market/limit sell
+        //
+        //     {
+        //         "currency":"USDT",
+        //         "fee":"-0.04647925", // ←--- fee in received quote currency
+        //         "price":"129.13", // ←------ price
+        //         "size":"30.98616393", // ←-- cost
+        //     },
+        //     {
+        //         "currency":"ETH",
+        //         "fee":"0",
+        //         "price":"129.13",
+        //         "size":"0.23996099", // ←--- amount
+        //     },
+        //
+        //     // market/limit buy
+        //
+        //     {
+        //         "currency":"ETH",
+        //         "fee":"-0.00036049", // ←--- fee in received base currency
+        //         "price":"129.16", // ←------ price
+        //         "size":"0.240322", // ←----- amount
+        //     },
+        //     {
+        //         "currency":"USDT",
+        //         "fee":"0",
+        //         "price":"129.16",
+        //         "size":"31.03998952", // ←-- cost
+        //     }
+        //
+        const timestamp = this.parse8601(this.safeString2(trade, 'timestamp', 'created_at'));
+        let takerOrMaker = this.safeString2(trade, 'exec_type', 'liquidity');
+        if (takerOrMaker === 'M') {
+            takerOrMaker = 'maker';
+        } else if (takerOrMaker === 'T') {
+            takerOrMaker = 'taker';
+        }
+        let fee = undefined;
+        if (feeCost !== undefined) {
+            const feeCurrencyId = this.safeString(userTrade, 'currency');
+            const feeCurrencyCode = this.safeCurrencyCode(feeCurrencyId);
+            fee = {
+                // fee is either a positive number (invitation rebate)
+                // or a negative number (transaction fee deduction)
+                // therefore we need to invert the fee
+                // more about it https://github.com/ccxt/ccxt/issues/5909
+                'cost': -feeCost,
+                'currency': feeCurrencyCode,
+            };
+        }
+        const orderId = this.safeString(trade, 'order_id');
+        return {
+            'info': pair,
+            'timestamp': timestamp,
+            'datetime': this.iso8601(timestamp),
+            'symbol': symbol,
+            'id': id,
+            'order': orderId,
+            'type': undefined,
+            'takerOrMaker': takerOrMaker,
+            'side': side,
+            'price': price,
+            'amount': amount,
+            'cost': cost,
+            'fee': fee,
+        };
+    }
+
+    parseMyTrades(trades, market = undefined, since = undefined, limit = undefined, params = {}) {
+        const grouped = this.groupBy(trades, 'trade_id');
+        const tradeIds = Object.keys(grouped);
+        const result = [];
+        for (let i = 0; i < tradeIds.length; i++) {
+            const tradeId = tradeIds[i];
+            const pair = grouped[tradeId];
+            // make sure it has exactly 2 trades, no more, no less
+            const numTradesInPair = pair.length;
+            if (numTradesInPair === 2) {
+                const trade = this.parseMyTrade(pair);
+                result.push(trade);
+            }
+        }
+        let symbol = undefined;
+        if (market !== undefined) {
+            symbol = market['symbol'];
+        }
+        return this.filterBySymbolSinceLimit(result, symbol, since, limit);
+    }
+
+    async fetchMyTrades(symbol = undefined, since = undefined, limit = undefined, params = {}) {
+        // okex actually returns ledger entries instead of fills here, so each fill in the order
+        // is represented by two trades with opposite buy/sell sides, not one :\
+        // this aspect renders the 'fills' endpoint unusable for fetchOrderTrades
+        // until either OKEX fixes the API or we workaround this on our side somehow
+        if (symbol === undefined) {
+            throw new ArgumentsRequired(this.id + ' fetchMyTrades requires a symbol argument');
+        }
+        await this.loadMarkets();
+        const market = this.market(symbol);
+        if ((limit !== undefined) && (limit > 100)) {
             limit = 100;
         }
         const request = {
             'instrument_id': market.symbol.replace('/', '-'),
-            'order_id': id,
-            // from: '1', // return the page after the specified page number
-            // to: '1', // return the page before the specified page number
-            'limit': limit, // optional, number of results per request, default = maximum = 100
+            // 'order_id': id, // string
+            // 'after': '1', // pagination of data to return records earlier than the requested ledger_id
+            // 'before': '1', // P=pagination of data to return records newer than the requested ledger_id
+            // 'limit': limit, // optional, number of results per request, default = maximum = 100
         };
-        const defaultType = this.safeString2 (this.options, 'fetchMyTrades', 'defaultType');
-        const type = this.safeString (params, 'type', defaultType);
-        const query = this.omit (params, 'type');
+        const defaultType = this.safeString2(this.options, 'fetchMyTrades', 'defaultType');
+        const type = this.safeString(params, 'type', defaultType);
+        const query = this.omit(params, 'type');
         const method = type + 'GetFills';
-        const response = await this[method] (this.extend (request, query));
-        //
-        // spot trades, margin trades
+        const response = await this[method](this.extend(request, query));
         //
         //     [
-        //         [
-        //             {
-        //                 "created_at":"2019-03-15T02:52:56.000Z",
-        //                 "exec_type":"T", // whether the order is taker or maker
-        //                 "fee":"0.00000082",
-        //                 "instrument_id":"BTC-USDT",
-        //                 "ledger_id":"3963052721",
-        //                 "liquidity":"T", // whether the order is taker or maker
-        //                 "order_id":"2482659399697408",
-        //                 "price":"3888.6",
-        //                 "product_id":"BTC-USDT",
-        //                 "side":"buy",
-        //                 "size":"0.00055306",
-        //                 "timestamp":"2019-03-15T02:52:56.000Z"
-        //             },
-        //         ],
+        //         // sell
         //         {
-        //             "before":"3963052722",
-        //             "after":"3963052718"
+        //             "created_at":"2020-03-29T11:55:25.000Z",
+        //             "currency":"USDT",
+        //             "exec_type":"T",
+        //             "fee":"-0.04647925",
+        //             "instrument_id":"ETH-USDT",
+        //             "ledger_id":"10562924353",
+        //             "liquidity":"T",
+        //             "order_id":"4636470489136128",
+        //             "price":"129.13",
+        //             "product_id":"ETH-USDT",
+        //             "side":"buy",
+        //             "size":"30.98616393",
+        //             "timestamp":"2020-03-29T11:55:25.000Z",
+        //             "trade_id":"18551601"
+        //         },
+        //         {
+        //             "created_at":"2020-03-29T11:55:25.000Z",
+        //             "currency":"ETH",
+        //             "exec_type":"T",
+        //             "fee":"0",
+        //             "instrument_id":"ETH-USDT",
+        //             "ledger_id":"10562924352",
+        //             "liquidity":"T",
+        //             "order_id":"4636470489136128",
+        //             "price":"129.13",
+        //             "product_id":"ETH-USDT",
+        //             "side":"sell",
+        //             "size":"0.23996099",
+        //             "timestamp":"2020-03-29T11:55:25.000Z",
+        //             "trade_id":"18551601"
+        //         },
+        //         // buy
+        //         {
+        //             "created_at":"2020-03-29T11:55:16.000Z",
+        //             "currency":"ETH",
+        //             "exec_type":"T",
+        //             "fee":"-0.00036049",
+        //             "instrument_id":"ETH-USDT",
+        //             "ledger_id":"10562922669",
+        //             "liquidity":"T",
+        //             "order_id": "4636469894136832",
+        //             "price":"129.16",
+        //             "product_id":"ETH-USDT",
+        //             "side":"buy",
+        //             "size":"0.240322",
+        //             "timestamp":"2020-03-29T11:55:16.000Z",
+        //             "trade_id":"18551600"
+        //         },
+        //         {
+        //             "created_at":"2020-03-29T11:55:16.000Z",
+        //             "currency":"USDT",
+        //             "exec_type":"T",
+        //             "fee":"0",
+        //             "instrument_id":"ETH-USDT",
+        //             "ledger_id":"10562922668",
+        //             "liquidity":"T",
+        //             "order_id":"4636469894136832",
+        //             "price":"129.16",
+        //             "product_id":"ETH-USDT",
+        //             "side":"sell",
+        //             "size":"31.03998952",
+        //             "timestamp":"2020-03-29T11:55:16.000Z",
+        //             "trade_id":"18551600"
         //         }
         //     ]
         //
-        // futures trades, swap trades
-        //
-        //     [
-        //         {
-        //             "trade_id":"197429674631450625",
-        //             "instrument_id":"EOS-USD-SWAP",
-        //             "order_id":"6a-7-54d663a28-0",
-        //             "price":"3.633",
-        //             "order_qty":"1.0000",
-        //             "fee":"-0.000551",
-        //             "created_at":"2019-03-21T04:41:58.0Z", // missing in swap trades
-        //             "timestamp":"2019-03-25T05:56:31.287Z", // missing in futures trades
-        //             "exec_type":"M", // whether the order is taker or maker
-        //             "side":"short", // "buy" in futures trades
-        //         }
-        //     ]
-        //
-        let trades = undefined;
-        if (market['type'] === 'swap' || market['type'] === 'futures') {
-            trades = response;
-        } else {
-            const responseLength = response.length;
-            if (responseLength < 1) {
-                return [];
-            }
-            trades = response[0];
-        }
-        return this.parseTrades (trades, market, since, limit);
+        return this.parseMyTrades(response, market, since, limit, params);
     }
 
-    async fetchLedger (code = undefined, since = undefined, limit = undefined, params = {}) {
-        await this.loadMarkets ();
-        const defaultType = this.safeString2 (this.options, 'fetchLedger', 'defaultType');
-        const type = this.safeString (params, 'type', defaultType);
-        const query = this.omit (params, 'type');
+    async fetchOrderTrades(id, symbol = undefined, since = undefined, limit = undefined, params = {}) {
+        const request = {
+            // 'instrument_id': market['id'],
+            'order_id': id,
+            // 'after': '1', // return the page after the specified page number
+            // 'before': '1', // return the page before the specified page number
+            // 'limit': limit, // optional, number of results per request, default = maximum = 100
+        };
+        return await this.fetchMyTrades(symbol, since, limit, this.extend(request, params));
+    }
+
+    async fetchLedger(code = undefined, since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets();
+        const defaultType = this.safeString2(this.options, 'fetchLedger', 'defaultType');
+        const type = this.safeString(params, 'type', defaultType);
+        const query = this.omit(params, 'type');
         const suffix = (type === 'account') ? '' : 'Accounts';
         let argument = '';
         const request = {
@@ -2373,19 +2854,19 @@ module.exports = class okex3 extends Exchange {
         let currency = undefined;
         if ((type === 'spot') || (type === 'futures')) {
             if (code === undefined) {
-                throw new ArgumentsRequired (this.id + " fetchLedger requires a currency code argument for '" + type + "' markets");
+                throw new ArgumentsRequired(this.id + " fetchLedger requires a currency code argument for '" + type + "' markets");
             }
             argument = 'Currency';
-            currency = this.currency (code);
+            currency = this.currency(code);
             request['currency'] = currency['id'];
         } else if ((type === 'margin') || (type === 'swap')) {
             if (code === undefined) {
-                throw new ArgumentsRequired (this.id + " fetchLedger requires a code argument (a market symbol) for '" + type + "' markets");
+                throw new ArgumentsRequired(this.id + " fetchLedger requires a code argument (a market symbol) for '" + type + "' markets");
             }
             argument = 'InstrumentId';
-            const market = this.market (code); // we intentionally put a market inside here for the margin and swap ledgers
-            currency = this.currency (market['base']);
-            request['instrument_id'] = market.symbol.replace('/', '-');
+            const market = this.market(code); // we intentionally put a market inside here for the margin and swap ledgers
+            currency = this.currency(market['base']);
+            request['instrument_id'] = market['id'];
             //
             //     if (type === 'margin') {
             //         //
@@ -2418,7 +2899,7 @@ module.exports = class okex3 extends Exchange {
             //
         } else if (type === 'account') {
             if (code !== undefined) {
-                currency = this.currency (code);
+                currency = this.currency(code);
                 request['currency'] = currency['id'];
             }
             //
@@ -2443,10 +2924,10 @@ module.exports = class okex3 extends Exchange {
             //     request['type'] = 'number';
             //
         } else {
-            throw new NotSupported (this.id + " fetchLedger does not support the '" + type + "' type (the type must be one of 'account', 'spot', 'margin', 'futures', 'swap')");
+            throw new NotSupported(this.id + " fetchLedger does not support the '" + type + "' type (the type must be one of 'account', 'spot', 'margin', 'futures', 'swap')");
         }
         const method = type + 'Get' + suffix + argument + 'Ledger';
-        const response = await this[method] (this.extend (request, query));
+        const response = await this[method](this.extend(request, query));
         //
         // transfer     funds transfer in/out
         // trade        funds moved as a result of a trade, spot and margin accounts only
@@ -2546,11 +3027,17 @@ module.exports = class okex3 extends Exchange {
         //         },
         //     ]
         //
-        const entries = (type === 'margin') ? response[0] : response;
-        return this.parseLedger (entries, currency, since, limit);
+        const responseLength = response.length;
+        if (responseLength < 1) {
+            return [];
+        }
+        const isArray = Array.isArray(response[0]);
+        const isMargin = (type === 'margin');
+        const entries = (isMargin && isArray) ? response[0] : response;
+        return this.parseLedger(entries, currency, since, limit);
     }
 
-    parseLedgerEntryType (type) {
+    parseLedgerEntryType(type) {
         const types = {
             'transfer': 'transfer', // // funds transfer in/out
             'trade': 'trade', // funds moved as a result of a trade, spot and margin accounts only
@@ -2562,10 +3049,10 @@ module.exports = class okex3 extends Exchange {
             'funding': 'fee', // funding fee, swap only
             'margin': 'margin', // a change in the amount after adjusting margin, swap only
         };
-        return this.safeString (types, type, type);
+        return this.safeString(types, type, type);
     }
 
-    parseLedgerEntry (item, currency = undefined) {
+    parseLedgerEntry(item, currency = undefined) {
         //
         //
         // account
@@ -2640,21 +3127,22 @@ module.exports = class okex3 extends Exchange {
         //         "timestamp":"2019-03-25T05:56:31.286Z"
         //     },
         //
-        const id = this.safeString (item, 'ledger_id');
+        const id = this.safeString(item, 'ledger_id');
         const account = undefined;
-        const details = this.safeValue (item, 'details', {});
-        const referenceId = this.safeString (details, 'order_id');
+        const details = this.safeValue(item, 'details', {});
+        const referenceId = this.safeString(details, 'order_id');
         const referenceAccount = undefined;
-        const type = this.parseLedgerEntryType (this.safeString (item, 'type'));
-        const code = this.safeCurrencyCode (item, 'currency', currency);
-        const amount = this.safeFloat (item, 'amount');
-        const timestamp = this.parse8601 (this.safeString (item, 'timestamp'));
+        const type = this.parseLedgerEntryType(this.safeString(item, 'type'));
+        const code = this.safeCurrencyCode(this.safeString(item, 'currency'), currency);
+        const amount = this.safeFloat(item, 'amount');
+        const timestamp = this.parse8601(this.safeString(item, 'timestamp'));
         const fee = {
-            'cost': this.safeFloat (item, 'fee'),
+            'cost': this.safeFloat(item, 'fee'),
             'currency': code,
         };
         const before = undefined;
-        const after = this.safeFloat (item, 'balance');
+        const after = this.safeFloat(item, 'balance');
+        const status = 'ok';
         return {
             'info': item,
             'id': id,
@@ -2666,24 +3154,27 @@ module.exports = class okex3 extends Exchange {
             'amount': amount,
             'before': before, // balance before
             'after': after, // balance after
+            'status': status,
             'timestamp': timestamp,
-            'datetime': this.iso8601 (timestamp),
+            'datetime': this.iso8601(timestamp),
             'fee': fee,
         };
     }
 
-    sign (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
-        const request = '/api' + '/' + api + '/' + this.version + '/' + this.implodeParams (path, params);
-        let url = this.urls['api'] + request;
-        let query = this.omit (params, this.extractParams (path));
-        const type = this.getPathAuthenticationType (path);
+    sign(path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
+        const isArray = Array.isArray(params);
+        let request = '/api/' + api + '/' + this.version + '/';
+        request += isArray ? path : this.implodeParams(path, params);
+        const query = isArray ? params : this.omit(params, this.extractParams(path));
+        let url = this.implodeParams(this.urls['api']['rest'], { 'hostname': this.hostname }) + request;
+        const type = this.getPathAuthenticationType(path);
         if (type === 'public') {
-            if (Object.keys (query).length) {
-                url += '?' + this.urlencode (query);
+            if (Object.keys(query).length) {
+                url += '?' + this.urlencode(query);
             }
         } else if (type === 'private') {
-            this.checkRequiredCredentials ();
-            const timestamp = this.iso8601 (this.milliseconds ());
+            this.checkRequiredCredentials();
+            const timestamp = this.iso8601(this.milliseconds());
             headers = {
                 'OK-ACCESS-KEY': this.apiKey,
                 'OK-ACCESS-PASSPHRASE': this.password,
@@ -2694,51 +3185,56 @@ module.exports = class okex3 extends Exchange {
             };
             let auth = timestamp + method + request;
             if (method === 'GET') {
-                if (Object.keys (query).length) {
-                    const urlencodedQuery = '?' + this.urlencode (query);
+                if (Object.keys(query).length) {
+                    const urlencodedQuery = '?' + this.urlencode(query);
                     url += urlencodedQuery;
                     auth += urlencodedQuery;
                 }
             } else {
-                if (Object.keys (query).length) {
-                    const jsonQuery = this.json (query);
-                    body = jsonQuery;
-                    auth += jsonQuery;
+                if (isArray || Object.keys(query).length) {
+                    body = this.json(query);
+                    auth += body;
                 }
                 headers['Content-Type'] = 'application/json';
             }
-            headers['OK-ACCESS-SIGN'] = this.hmac (this.encode (auth), this.encode (this.secret), 'sha256', 'base64');
+            const signature = this.hmac(this.encode(auth), this.encode(this.secret), 'sha256', 'base64');
+            headers['OK-ACCESS-SIGN'] = this.decode(signature);
         }
         return { 'url': url, 'method': method, 'body': body, 'headers': headers };
     }
 
-    getPathAuthenticationType (path) {
-        const auth = this.safeValue (this.options, 'auth', {});
-        const key = this.findBroadlyMatchedKey (auth, path);
-        return this.safeString (auth, key, 'private');
+    getPathAuthenticationType(path) {
+        // https://github.com/ccxt/ccxt/issues/6651
+        // a special case to handle the optionGetUnderlying interefering with
+        // other endpoints containing this keyword
+        if (path === 'underlying') {
+            return 'public';
+        }
+        const auth = this.safeValue(this.options, 'auth', {});
+        const key = this.findBroadlyMatchedKey(auth, path);
+        return this.safeString(auth, key, 'private');
     }
 
-    handleErrors (code, reason, url, method, headers, body, response = undefined) {
+    handleErrors(code, reason, url, method, headers, body, response, requestHeaders, requestBody) {
         const feedback = this.id + ' ' + body;
         if (code === 503) {
-            throw new ExchangeError (feedback);
+            // {"message":"name resolution failed"}
+            throw new ExchangeNotAvailable(feedback);
         }
-        const exact = this.exceptions['exact'];
-        const message = this.safeString (response, 'message');
-        const errorCode = this.safeString2 (response, 'code', 'error_code');
-        if (errorCode in exact) {
-            throw new exact[errorCode] (feedback);
+        if (!response) {
+            return; // fallback to default error handler
         }
+        const message = this.safeString(response, 'message');
+        const errorCode = this.safeString2(response, 'code', 'error_code');
         if (message !== undefined) {
-            if (message in exact) {
-                throw new exact[message] (feedback);
+            this.throwExactlyMatchedException(this.exceptions['exact'], message, feedback);
+            this.throwBroadlyMatchedException(this.exceptions['broad'], message, feedback);
+            this.throwExactlyMatchedException(this.exceptions['exact'], errorCode, feedback);
+            const nonEmptyMessage = (message !== '');
+            const nonZeroErrorCode = (errorCode !== undefined) && (errorCode !== '0');
+            if (nonZeroErrorCode || nonEmptyMessage) {
+                throw new ExchangeError(feedback); // unknown message
             }
-            const broad = this.exceptions['broad'];
-            const broadKey = this.findBroadlyMatchedKey (broad, message);
-            if (broadKey !== undefined) {
-                throw new broad[broadKey] (feedback);
-            }
-            throw new ExchangeError (feedback); // unknown message
         }
     }
 };
