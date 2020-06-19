@@ -514,7 +514,7 @@ module.exports = class binance extends Exchange {
         }
         const query = this.omit(params, 'type');
         const response = await this[method](query);
-        
+
         const result = { 'info': response };
         if ((type === 'spot') || (type === 'margin')) {
             const balances = this.safeValue2(response, 'balances', 'userAssets', []);
@@ -666,7 +666,7 @@ module.exports = class binance extends Exchange {
             request['limit'] = limit; // default == max == 500
         }
         // const method = market['spot'] ? 'publicGetKlines' : 'fapiPublicGetKlines';
-        const method ='publicGetKlines';
+        const method = 'publicGetKlines';
         const response = await this[method](this.extend(request, params));
         return this.parseOHLCVs(response, market, timeframe, since, limit);
     }
@@ -992,14 +992,14 @@ module.exports = class binance extends Exchange {
             }
             params = this.omit(params, 'test');
         }
+        if (type == "stop_limit") {
+            type = "stop_loss_limit"
+            params = { "stopPrice": params.stopPrice }
+        }
         const uppercaseType = type.toUpperCase();
         const validOrderTypes = this.safeValue(market['info'], 'orderTypes');
         if (!this.inArray(uppercaseType, validOrderTypes)) {
             throw new InvalidOrder(this.id + ' ' + type + ' is not a valid order type in ' + market['type'] + ' market ' + symbol);
-        }
-        if (type == "stop_limit") {
-            type = "stop_loss_limit"
-            params = { "stopPrice": params.stopPrice }
         }
         const request = {
             'symbol': market['id'],
@@ -1081,7 +1081,6 @@ module.exports = class binance extends Exchange {
             } else {
                 params = this.omit(params, 'stopPrice');
                 request['stopPrice'] = this.priceToPrecision(symbol, stopPrice);
-                params = {};
             }
         }
         const response = await this[method](this.extend(request, params));

@@ -275,68 +275,62 @@ module.exports = class huobipro extends Exchange {
     }
 
     async fetchMarkets(params = {}) {
-        let cacheData = await redisRead(this.id + '|markets');
-        if (cacheData) return cacheData;
-        else {
-            const method = this.options['fetchMarketsMethod'];
-            const response = await this[method](params);
-            const markets = this.safeValue(response, 'data');
-            const numMarkets = markets.length;
-            if (numMarkets < 1) {
-                throw new ExchangeError(this.id + ' publicGetCommonSymbols returned empty response: ' + this.json(markets));
-            }
-            const result = [];
-            for (let i = 0; i < markets.length; i++) {
-                const market = markets[i];
-                const baseId = this.safeString(market, 'base-currency');
-                const quoteId = this.safeString(market, 'quote-currency');
-                const id = baseId + quoteId;
-                const base = this.safeCurrencyCode(baseId);
-                const quote = this.safeCurrencyCode(quoteId);
-                const symbol = base + '/' + quote;
-                const precision = {
-                    'amount': market['amount-precision'],
-                    'price': market['price-precision'],
-                };
-                const maker = (base === 'OMG') ? 0 : 0.2 / 100;
-                const taker = (base === 'OMG') ? 0 : 0.2 / 100;
-                const minAmount = this.safeFloat(market, 'min-order-amt', Math.pow(10, -precision['amount']));
-                const maxAmount = this.safeFloat(market, 'max-order-amt');
-                const minCost = this.safeFloat(market, 'min-order-value', 0);
-                const state = this.safeString(market, 'state');
-                const active = (state === 'online');
-                result.push({
-                    'id': id,
-                    'symbol': symbol,
-                    'base': base,
-                    'quote': quote,
-                    'baseId': baseId,
-                    'quoteId': quoteId,
-                    'active': active,
-                    'precision': precision,
-                    'taker': taker,
-                    'maker': maker,
-                    'limits': {
-                        'amount': {
-                            'min': minAmount,
-                            'max': maxAmount,
-                        },
-                        'price': {
-                            'min': Math.pow(10, -precision['price']),
-                            'max': undefined,
-                        },
-                        'cost': {
-                            'min': minCost,
-                            'max': undefined,
-                        },
-                    },
-                    'info': market,
-                });
-            }
-            // Storing markets in Redis
-            await redisWrite(this.id + '|markets', result, false, 60 * 60);
-            return result;
+        const method = this.options['fetchMarketsMethod'];
+        const response = await this[method](params);
+        const markets = this.safeValue(response, 'data');
+        const numMarkets = markets.length;
+        if (numMarkets < 1) {
+            throw new ExchangeError(this.id + ' publicGetCommonSymbols returned empty response: ' + this.json(markets));
         }
+        const result = [];
+        for (let i = 0; i < markets.length; i++) {
+            const market = markets[i];
+            const baseId = this.safeString(market, 'base-currency');
+            const quoteId = this.safeString(market, 'quote-currency');
+            const id = baseId + quoteId;
+            const base = this.safeCurrencyCode(baseId);
+            const quote = this.safeCurrencyCode(quoteId);
+            const symbol = base + '/' + quote;
+            const precision = {
+                'amount': market['amount-precision'],
+                'price': market['price-precision'],
+            };
+            const maker = (base === 'OMG') ? 0 : 0.2 / 100;
+            const taker = (base === 'OMG') ? 0 : 0.2 / 100;
+            const minAmount = this.safeFloat(market, 'min-order-amt', Math.pow(10, -precision['amount']));
+            const maxAmount = this.safeFloat(market, 'max-order-amt');
+            const minCost = this.safeFloat(market, 'min-order-value', 0);
+            const state = this.safeString(market, 'state');
+            const active = (state === 'online');
+            result.push({
+                'id': id,
+                'symbol': symbol,
+                'base': base,
+                'quote': quote,
+                'baseId': baseId,
+                'quoteId': quoteId,
+                'active': active,
+                'precision': precision,
+                'taker': taker,
+                'maker': maker,
+                'limits': {
+                    'amount': {
+                        'min': minAmount,
+                        'max': maxAmount,
+                    },
+                    'price': {
+                        'min': Math.pow(10, -precision['price']),
+                        'max': undefined,
+                    },
+                    'cost': {
+                        'min': minCost,
+                        'max': undefined,
+                    },
+                },
+                'info': market,
+            });
+        }
+        return result;
     }
 
     parseTicker(ticker, market = undefined) {

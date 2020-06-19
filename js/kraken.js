@@ -932,15 +932,33 @@ module.exports = class kraken extends Exchange {
     }
 
     async fetchBalance(params = {}) {
-        const response = await this.privatePostBalance(params);
-        const balances = this.safeValue(response, 'result', {});
-        const result = { 'info': balances };
-        const currencyIds = Object.keys(balances);
-        for (let i = 0; i < currencyIds.length; i++) {
-            const currencyId = currencyIds[i];
-            const code = this.safeCurrencyCode(currencyId);
-            const account = this.account();
-            account['total'] = this.safeFloat(balances, currencyId);
+        await this.loadMarkets();
+        let response = await this.privatePostBalance(params);
+        let balances = this.safeValue(response, 'result');
+        if (balances === undefined)
+            throw new ExchangeNotAvailable(this.id + ' fetchBalance failed due to a malformed response ' + this.json(response));
+        let result = { 'info': balances };
+        let currencies = Object.keys(balances);
+        for (let c = 0; c < currencies.length; c++) {
+            let currency = currencies[c];
+            let code = currency;
+            if (code in this.currencies_by_id) {
+                code = this.currencies_by_id[code]['code'];
+            } else {
+                // X-ISO4217-A3 standard currency codes
+                if (code[0] === 'X') {
+                    code = code.slice(1);
+                } else if (code[0] === 'Z') {
+                    code = code.slice(1);
+                }
+                code = this.commonCurrencyCode(code);
+            }
+            let balance = parseFloat(balances[currency]);
+            let account = {
+                'free': balance,
+                'used': 0.0,
+                'total': balance,
+            };
             result[code] = account;
         }
         return this.parseBalance(result);
