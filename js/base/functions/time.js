@@ -6,7 +6,17 @@ const now = Date.now // TODO: figure out how to utilize performance.now () prope
 const microseconds = () => now () * 1000 // TODO: utilize performance.now for that purpose
 const milliseconds = now
 const seconds      = () => Math.floor (now () / 1000)
-
+const uuidv1 = () => {
+    const biasSeconds = 12219292800  // seconds from 15th Oct 1572 to Jan 1st 1970
+    const bias = biasSeconds * 10000000  // in hundreds of nanoseconds
+    const time = microseconds () * 10 + bias
+    const timeHex = time.toString (16)
+    const arranged = timeHex.slice (7, 15) + timeHex.slice (3, 7) + '1' + timeHex.slice (0, 3)
+    // these should be random, but we're not making more than 10 requests per microsecond so who cares
+    const clockId = '9696' // a 14 bit number
+    const macAddress = 'ff'.repeat (6)
+    return arranged + clockId + macAddress
+}
 /*  ------------------------------------------------------------------------ */
 
 const setTimeout_original = setTimeout
@@ -161,6 +171,7 @@ module.exports =
 
     {
         now
+        , uuidv1
         , microseconds
         , milliseconds
         , seconds
