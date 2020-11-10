@@ -347,6 +347,7 @@ module.exports = class probit extends Exchange {
 
     async fetchBalance(params = {}) {
         await this.loadMarkets();
+        await this.signIn();
         const response = await this.privateGetBalance(params);
         //
         //     {
@@ -379,6 +380,7 @@ module.exports = class probit extends Exchange {
         const request = {
             'market_id': market['id'],
         };
+        await this.signIn();
         const response = await this.publicGetOrderBook(this.extend(request, params));
         //
         //     {
@@ -532,6 +534,7 @@ module.exports = class probit extends Exchange {
         if (limit !== undefined) {
             request['limit'] = limit;
         }
+        await this.signIn();
         const response = await this.privateGetTradeHistory(this.extend(request, params));
         //
         //     {
@@ -571,6 +574,7 @@ module.exports = class probit extends Exchange {
         if (limit !== undefined) {
             request['limit'] = limit;
         }
+        await this.signIn();
         const response = await this.publicGetTrade(this.extend(request, params));
         //
         //     {
@@ -807,6 +811,7 @@ module.exports = class probit extends Exchange {
             market = this.market(symbol);
             request['market_id'] = market['id'];
         }
+        await this.signIn();
         const response = await this.privateGetOpenOrder(this.extend(request, params));
         const data = this.safeValue(response, 'data');
         return this.parseOrders(data, market, since, limit);
@@ -830,6 +835,7 @@ module.exports = class probit extends Exchange {
         if (limit) {
             request['limit'] = limit;
         }
+        await this.signIn();
         const response = await this.privateGetOrderHistory(this.extend(request, params));
         const data = this.safeValue(response, 'data');
         return this.parseOrders(data, market, since, limit);
@@ -851,6 +857,7 @@ module.exports = class probit extends Exchange {
             request['order_id'] = id;
         }
         const query = this.omit(params, ['clientOrderId', 'client_order_id']);
+        await this.signIn();
         const response = await this.privateGetOrder(this.extend(request, query));
         const data = this.safeValue(response, 'data', []);
         const order = this.safeValue(data, 0);
@@ -991,6 +998,7 @@ module.exports = class probit extends Exchange {
             }
         }
         const query = this.omit(params, ['timeInForce', 'time_in_force', 'clientOrderId', 'client_order_id']);
+        await this.signIn();
         const response = await this.privatePostNewOrder(this.extend(request, query));
         //
         //     {
@@ -1035,6 +1043,7 @@ module.exports = class probit extends Exchange {
             'market_id': market['id'],
             'order_id': id,
         };
+        await this.signIn();
         const response = await this.privatePostCancelOrder(this.extend(request, params));
         const data = this.safeValue(response, 'data');
         return this.parseOrder(data);
@@ -1060,6 +1069,7 @@ module.exports = class probit extends Exchange {
         const request = {
             'currency_id': currency['id'],
         };
+        await this.signIn();
         const response = await this.privateGetDepositAddress(this.extend(request, params));
         //
         //     {
@@ -1091,6 +1101,7 @@ module.exports = class probit extends Exchange {
             }
             request['currency_id'] = codes.join(',');
         }
+        await this.signIn();
         const response = await this.privateGetDepositAddress(this.extend(request, params));
         const data = this.safeValue(response, 'data', []);
         return this.parseDepositAddresses(data);
@@ -1129,6 +1140,7 @@ module.exports = class probit extends Exchange {
             // whether the amount field includes fees
             // 'include_fee': false, // makes sense only when fee_currency_id is equal to currency_id
         };
+        await this.signIn();
         const response = await this.privatePostWithdrawal(this.extend(request, params));
         const data = this.safeValue(response, 'data');
         return this.parseTransaction(data, currency);
