@@ -57,15 +57,15 @@ module.exports = class lcx extends Exchange {
             'urls': {
                 'logo': 'https://web.lcx.com/wp-content/uploads/2018/12/logo_black.png',
                 'api': {
-                    'accounts': 'https://trading-api-staging.lcx.com',
-                    'public': 'https://trading-api-staging.lcx.com',
-                    'private': 'https://trading-api-staging.lcx.com',
+                    'accounts': 'https://demo-exchange-api.lcx.com',
+                    'public': 'https://demo-exchange-api.lcx.com',
+                    'private': 'https://demo-exchange-api.lcx.com',
                 },
                 'www': 'https://www.lcx.com',
                 'doc': [
                     'https://exchange.lcx.com/v1/docs',
                 ],
-                'fees': 'https://exchange.lcx.com/fees',
+                'fees': 'https://exchange.lcx.com/setting/fees',
                 'referral': 'https://accounts.lcx.com/register?referralCode=CCXT_DOCS',
             },
             'api': {
