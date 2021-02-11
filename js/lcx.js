@@ -420,6 +420,8 @@ module.exports = class lcx extends Exchange {
             'datetime': this.iso8601(timestamp),
             'high': this.safeFloat(ticker, 'high'),
             'low': this.safeFloat(ticker, 'low'),
+            'ask': this.safeFloat(ticker, 'bestAsk'),
+            'bid': this.safeFloat(ticker, 'bestBid'),
             'open': open,
             'close': close,
             'last': close,
