@@ -274,11 +274,11 @@ module.exports = class lcx extends Exchange {
         const result = { 'info': data };
         for (let i = 0; i < data.length; i++) {
             const balance = data[i];
-            const code = this.safeString(balance, 'Coin');
+            const code = this.safeString(balance, 'coin');
             const account = this.account();
-            account['total'] = this.safeFloat(balance, 'TotalBalance');
-            account['free'] = this.safeFloat(balance, 'FeeBalance');
-            account['used'] = this.safeFloat(balance, 'OccupiedBalance');
+            account['total'] = this.safeFloat(balance.balance, 'totalBalance');
+            account['free'] = this.safeFloat(balance.balance, 'freeBalance');
+            account['used'] = this.safeFloat(balance.balance, 'occupiedBalance');
             result[code] = account;
         }
         return this.parseBalance(result);
