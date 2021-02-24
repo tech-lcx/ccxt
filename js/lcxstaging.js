@@ -607,7 +607,8 @@ module.exports = class lcxstaging extends Exchange {
         if (symbol !== undefined) {
             request['pair'] = symbol;
         }
-        request['offset'] = 1;
+        if (params.offset) request['offset'] = params.offset;
+        else request['offset'] = 1;
 
         if (since) {
             request['fromDate'] = this.iso8601(since);
