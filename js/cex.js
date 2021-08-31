@@ -430,27 +430,37 @@ module.exports = class cex extends Exchange {
     }
 
     async fetchOHLCV (symbol, timeframe = '1m', since = undefined, limit = undefined, params = {}) {
-        await this.loadMarkets ();
-        const market = this.market (symbol);
+        await this.loadMarkets();
+        //console.log(symbol);
+        const market = this.market(symbol);
         if (since === undefined) {
-            since = this.milliseconds () - 86400000; // yesterday
-        } else {
-            if (this.options['fetchOHLCVWarning']) {
-                throw new ExchangeError (this.id + " fetchOHLCV warning: CEX can return historical candles for a certain date only, this might produce an empty or null reply. Set exchange.options['fetchOHLCVWarning'] = false or add ({ 'options': { 'fetchOHLCVWarning': false }}) to constructor params to suppress this warning message.");
-            }
+            since = this.milliseconds() - 86400000; // yesterday
         }
-        let ymd = this.ymd (since);
-        ymd = ymd.split ('-');
-        ymd = ymd.join ('');
+        // } else {
+        //     if (this.options['fetchOHLCVWarning']) {
+        //         throw new ExchangeError(this.id + " fetchOHLCV warning: CEX can return historical candles for a certain date only, this might produce an empty or null reply. Set exchange.options['fetchOHLCVWarning'] = false or add ({ 'options': { 'fetchOHLCVWarning': false }}) to constructor params to suppress this warning message.");
+        //     }
+        // }
+        let ymd = this.ymd(since);
+        ymd = ymd.split('-');
+        //console.log(ymd);
+        ymd = ymd.join('');
         const request = {
             'pair': market['id'],
             'yyyymmdd': ymd,
         };
         try {
-            const response = await this.publicGetOhlcvHdYyyymmddPair (this.extend (request, params));
+            const response = await this.publicGetOhlcvHdYyyymmddPair(this.extend(request, params));
+            //
+            //     {
+            //         "time":20200606,
+            //         "data1m":"[[1591403940,0.024972,0.024972,0.024969,0.024969,0.49999900]]",
+            //     }
+            //
             const key = 'data' + this.timeframes[timeframe];
-            const ohlcvs = JSON.parse (response[key]);
-            return this.parseOHLCVs (ohlcvs, market, timeframe, since, limit);
+            const data = this.safeString(response, key);
+            const ohlcvs = JSON.parse(data);
+            return this.parseOHLCVs(ohlcvs, market, timeframe, since, limit);
         } catch (e) {
             if (e instanceof NullResponse) {
                 return [];
